@@ -1,7 +1,3 @@
-# app.py
-# Combined backend + Streamlit UI for ARGO RAG Explorer
-# Run: streamlit run app.py
-
 import os
 import re
 import json
@@ -510,10 +506,10 @@ def parse_profile_netcdf_to_rows(nc_path: str) -> List[Dict[str, Any]]:
                             "profile_file": os.path.relpath(nc_path, STORAGE_ROOT),
                             "obs_time": pd.to_datetime(tval).to_pydatetime() if tval is not None else None,
                             "lat": latv, "lon": lonv,
-                            "depth": dv,
-                            "variable": vname,
-                            "value": float(val)
-                        })
+                                "depth": dv,
+                                "variable": vname,
+                                "value": float(val)
+                            })
     finally:
         try:
             ds.close()
@@ -622,6 +618,27 @@ def ingest_measurement_rows(rows: List[Dict[str, Any]]) -> int:
 # SQL builder + parsing helpers
 ALLOWED_VAR_SUBSTR = ["temp", "psal", "doxy", "o2", "chla", "oxygen", "salin"]
 
+# mapping from name tokens to single-letter codes in index
+OCEAN_NAME_TO_CODE = {
+    'indian': 'I', 'india': 'I', 'arabian': 'I',
+    'pacific': 'P', 'pac': 'P',
+    'atlantic': 'A', 'atl': 'A',
+    'southern': 'S', 'antarctic': 'S', 'antarctica': 'S'
+}
+
+
+def normalize_ocean_token(tok: str) -> Optional[str]:
+    if not tok:
+        return None
+    t = tok.strip().lower()
+    if t in ('i','p','a','s'):
+        return t.upper()
+    for k,v in OCEAN_NAME_TO_CODE.items():
+        if t.startswith(k):
+            return v
+    return None
+
+
 def safe_sql_builder(filters: Dict[str, Any], target: str = "index") -> Tuple[str, Dict[str, Any]]:
     where = []
     params = {}
@@ -674,9 +691,30 @@ def safe_sql_builder(filters: Dict[str, Any], target: str = "index") -> Tuple[st
             where.append("date >= :t0"); params["t0"] = t0.strftime("%Y%m%d%H%M%S") if isinstance(t0, datetime.datetime) else str(t0)
         if t1 is not None:
             where.append("date <= :t1"); params["t1"] = t1.strftime("%Y%m%d%H%M%S") if isinstance(t1, datetime.datetime) else str(t1)
-        ocean = (filters.get("ocean") or "").strip()
-        if ocean:
-            where.append("ocean = :ocean"); params["ocean"] = ocean
+        ocean_raw = filters.get("ocean")
+        if ocean_raw:
+            # Accept list, comma-separated string, or human names. Normalize to list of single-letter codes.
+            ocean_list = []
+            if isinstance(ocean_raw, (list, tuple)):
+                candidates = list(ocean_raw)
+            else:
+                # split on commas or ' and '
+                candidates = re.split(r"[,;]|and\b", str(ocean_raw))
+            for c in candidates:
+                code = normalize_ocean_token(c)
+                if code:
+                    ocean_list.append(code)
+            ocean_list = list(dict.fromkeys([x for x in ocean_list if x]))
+            if len(ocean_list) == 1:
+                where.append("ocean = :ocean"); params["ocean"] = ocean_list[0]
+            elif len(ocean_list) > 1:
+                # build numbered params for IN
+                placeholders = []
+                for i,code in enumerate(ocean_list):
+                    key = f"ocean_{i}"
+                    placeholders.append(f":{key}")
+                    params[key] = code
+                where.append(f"ocean IN ({', '.join(placeholders)})")
         institution = (filters.get("institution") or "").strip()
         if institution:
             where.append("upper(institution) = upper(:institution)"); params["institution"] = institution
@@ -715,14 +753,24 @@ def _simple_parse_question(question: str) -> Dict[str, Any]:
     parsed = {"action": "answer", "filters": {}}
     if any(k in q for k in ["list float", "list floats", "floats in", "show floats", "find floats"]):
         parsed["action"] = "index"
-        if "indian" in q:
-            parsed["filters"]["ocean"] = "I"
-        elif "atlantic" in q:
-            parsed["filters"]["ocean"] = "A"
-        elif "pacific" in q:
-            parsed["filters"]["ocean"] = "P"
-        elif "southern" in q or "antarctic" in q:
-            parsed["filters"]["ocean"] = "S"
+        # collect ocean names & map to index codes (I/P/A/S)
+        oceans = []
+        # find full words like 'indian', 'pacific', 'atlantic', 'southern/antarctic'
+        names = re.findall(r"\b(indian|pacific|atlantic|southern|antarctic|arabian)\b", q, flags=re.I)
+        for n in names:
+            code = normalize_ocean_token(n)
+            if code:
+                oceans.append(code)
+        # if none found, but the word 'ocean' is present, allow single-letter mentions like 'I' or 'P'
+        if not oceans and 'ocean' in q:
+            letters = re.findall(r"\b([IPAS])\b", q)
+            for L in letters:
+                code = normalize_ocean_token(L)
+                if code:
+                    oceans.append(code)
+        if oceans:
+            # keep unique order-preserving
+            parsed["filters"]["ocean"] = list(dict.fromkeys(oceans))
         return parsed
     for var in ALLOWED_VAR_SUBSTR + ["salinity", "temperature"]:
         if var in q:
@@ -763,7 +811,26 @@ def llm_to_structured(llm, question: str) -> Dict[str, Any]:
         m = re.search(r"\{[\s\S]*\}", out)
         if m:
             try:
-                return json.loads(m.group(0))
+                parsed = json.loads(m.group(0))
+                # if the LLM returned human-readable ocean names, normalize to index codes
+                f = parsed.get('filters', {}) or {}
+                ocean_raw = f.get('ocean')
+                if ocean_raw:
+                    # try to normalize similar to _simple_parse_question
+                    if isinstance(ocean_raw, str):
+                        candidates = re.split(r"[,;]|and\b", ocean_raw)
+                    elif isinstance(ocean_raw, (list,tuple)):
+                        candidates = list(ocean_raw)
+                    else:
+                        candidates = [str(ocean_raw)]
+                    ocean_codes = []
+                    for c in candidates:
+                        code = normalize_ocean_token(str(c))
+                        if code:
+                            ocean_codes.append(code)
+                    if ocean_codes:
+                        parsed['filters']['ocean'] = list(dict.fromkeys(ocean_codes))
+                return parsed
             except Exception:
                 return _simple_parse_question(question)
     except Exception:
