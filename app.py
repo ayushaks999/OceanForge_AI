@@ -699,7 +699,7 @@ def safe_sql_builder(filters: Dict[str, Any], target: str = "index") -> Tuple[st
                 candidates = list(ocean_raw)
             else:
                 # split on commas or ' and '
-                candidates = re.split(r"[,;]|and\b", str(ocean_raw))
+                candidates = re.split(r"[,;]|\band\b", str(ocean_raw))
             for c in candidates:
                 code = normalize_ocean_token(c)
                 if code:
@@ -818,7 +818,7 @@ def llm_to_structured(llm, question: str) -> Dict[str, Any]:
                 if ocean_raw:
                     # try to normalize similar to _simple_parse_question
                     if isinstance(ocean_raw, str):
-                        candidates = re.split(r"[,;]|and\b", ocean_raw)
+                        candidates = re.split(r"[,;]|\band\b", ocean_raw)
                     elif isinstance(ocean_raw, (list,tuple)):
                         candidates = list(ocean_raw)
                     else:
@@ -1116,8 +1116,30 @@ with tabs[0]:
         df_map = df_near.dropna(subset=["latitude","longitude"])[:2000]
         if not df_map.empty:
             try:
-                fig = px.scatter_geo(df_map, lat='latitude', lon='longitude', hover_name='file', size='distance_km')
-                fig.update_layout(height=400)
+                # Enhanced, attractive map using Mapbox-style tiles (OpenStreetMap fallback)
+                center_lat = float(nq.get('lat', lat0)) if nq else float(lat0)
+                center_lon = float(nq.get('lon', lon0)) if nq else float(lon0)
+                df_map = df_map.copy()
+                df_map['ocean_cat'] = df_map['ocean'].fillna('Unknown')
+                # size by inverse distance (closer floats appear larger) but keep numeric safety
+                df_map['map_size'] = df_map['distance_km'].replace(0, 0.1)
+                df_map['map_size'] = (df_map['map_size'].max() / df_map['map_size']).clip(1, 20)
+
+                fig = px.scatter_mapbox(
+                    df_map,
+                    lat='latitude', lon='longitude',
+                    hover_name='file',
+                    hover_data={'date':True, 'distance_km':True, 'institution':True},
+                    color='ocean_cat',
+                    size='map_size',
+                    size_max=16,
+                    zoom=3,
+                    center={'lat': center_lat, 'lon': center_lon},
+                    height=520
+                )
+                fig.update_layout(mapbox_style='open-street-map', margin={'r':0,'t':0,'l':0,'b':0}, legend=dict(title='Ocean'))
+                # add the query center as a distinct marker
+                fig.add_trace(px.scatter_mapbox(pd.DataFrame([{'lat': center_lat, 'lon': center_lon, 'label':'Query Center'}]), lat='lat', lon='lon').data[0])
                 st.plotly_chart(fig, use_container_width=True)
             except Exception:
                 st.write("Map rendering failed.")
@@ -1177,8 +1199,20 @@ with tabs[1]:
                 st.dataframe(df.head(200))
                 df_map = df.dropna(subset=["latitude", "longitude"])[:2000]
                 if not df_map.empty:
-                    fig = px.scatter_geo(df_map, lat="latitude", lon="longitude", hover_name="file", scope="world")
-                    st.plotly_chart(fig, use_container_width=True)
+                    try:
+                        center = {'lat': float(df_map['latitude'].mean()), 'lon': float(df_map['longitude'].mean())}
+                        df_map = df_map.copy()
+                        df_map['ocean_cat'] = df_map['ocean'].fillna('Unknown')
+                        fig = px.scatter_mapbox(
+                            df_map,
+                            lat='latitude', lon='longitude', hover_name='file',
+                            hover_data={'date':True, 'institution':True}, color='ocean_cat',
+                            size_max=12, zoom=1, center=center, height=520
+                        )
+                        fig.update_layout(mapbox_style='open-street-map', margin={'r':0,'t':0,'l':0,'b':0}, legend=dict(title='Ocean'))
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception:
+                        st.write("Map rendering failed.")
 
 # --- Ingest Profiles ---
 with tabs[2]:
@@ -1269,8 +1303,15 @@ with tabs[3]:
         df_map = chat_df.dropna(subset=["latitude", "longitude"])[:2000]
         if not df_map.empty:
             try:
-                fig = px.scatter_geo(df_map, lat='latitude', lon='longitude', hover_name='file')
-                fig.update_layout(height=400)
+                center = {'lat': float(df_map['latitude'].mean()), 'lon': float(df_map['longitude'].mean())}
+                df_map = df_map.copy()
+                df_map['ocean_cat'] = df_map['ocean'].fillna('Unknown')
+                fig = px.scatter_mapbox(
+                    df_map, lat='latitude', lon='longitude', hover_name='file',
+                    hover_data={'date':True, 'institution':True}, color='ocean_cat',
+                    zoom=2, center=center, height=520
+                )
+                fig.update_layout(mapbox_style='open-street-map', margin={'r':0,'t':0,'l':0,'b':0}, legend=dict(title='Ocean'))
                 st.plotly_chart(fig, use_container_width=True)
             except Exception:
                 st.write("Map render failed.")
