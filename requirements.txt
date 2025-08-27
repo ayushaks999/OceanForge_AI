@@ -1,0 +1,40 @@
+# Core
+streamlit
+pandas
+numpy
+xarray
+netCDF4
+
+sqlalchemy
+psycopg2-binary        # required if you use PostgreSQL
+pyarrow
+plotly
+python-dotenv
+
+# Vector DB / embeddings
+chromadb
+duckdb
+
+langchain-google-genai
+langchain-core
+langchain-community
+google-genai
+tiktoken
+
+# Optional / utility
+scikit-learn
+joblib
+pyyaml
+PyPDF2
+pdf2image
+pillow
+pytesseract
+
+# Optional heavy model backend (install if GPU available)
+torch
+
+# Dev / convenience
+ipython
+pytz
+folium 
+streamlit-folium

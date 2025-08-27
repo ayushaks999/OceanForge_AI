@@ -1,0 +1,1514 @@
+# app.py
+# Combined backend + Streamlit UI for ARGO RAG Explorer
+# Run: streamlit run app.py
+
+import os
+import re
+import json
+import time
+import tempfile
+import sqlite3
+import multiprocessing
+import datetime
+from typing import Dict, Any, Tuple, List, Optional
+
+import numpy as np
+import pandas as pd
+import xarray as xr
+import requests
+import streamlit as st
+import plotly.express as px
+
+from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Float, DateTime, text, inspect
+from dotenv import load_dotenv
+
+# Optional LLM + embeddings (Gemini via LangChain) - gracefully optional
+try:
+    from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+except Exception:
+    ChatGoogleGenerativeAI = None
+    GoogleGenerativeAIEmbeddings = None
+
+# Optional chromadb - optional
+try:
+    import chromadb
+    from chromadb.config import Settings
+except Exception:
+    chromadb = None
+    Settings = None
+
+load_dotenv()
+
+def _get_env(k, default=None):
+    v = os.environ.get(k)
+    return v if v is not None else default
+
+GEMINI_API_KEY = _get_env("GEMINI_API_KEY")
+
+DB_PATH = os.path.abspath(_get_env("ARGO_SQLITE_PATH", "argo.db"))
+SQLITE_URL = f"sqlite:///{DB_PATH}"
+
+STORAGE_ROOT = os.path.abspath(_get_env("AGENTIC_RAG_STORAGE", "./storage"))
+os.makedirs(STORAGE_ROOT, exist_ok=True)
+
+INDEX_LOCAL_PATH = os.path.join(STORAGE_ROOT, "ar_index_global_prof.txt")
+INDEX_REMOTE_URL = "https://data-argo.ifremer.fr/ar_index_global_prof.txt"
+IFREMER_BASE = "https://data-argo.ifremer.fr/dac"
+
+USER_DB_PATH = os.path.abspath(_get_env("AGENTIC_RAG_DB_PATH", os.path.join(STORAGE_ROOT, "agentic_rag_meta.db")))
+
+CHROMA_DIR = os.path.join(STORAGE_ROOT, "chromadb")
+os.makedirs(CHROMA_DIR, exist_ok=True)
+
+STATUS_FILE = os.path.join(CHROMA_DIR, "build_status.json")
+
+# Multiprocessing start method
+try:
+    multiprocessing.set_start_method('fork')
+except Exception:
+    pass
+
+# SQLAlchemy + DB schema
+engine = create_engine(SQLITE_URL, connect_args={"check_same_thread": False})
+metadata = MetaData()
+
+argo_index_table = Table(
+    "argo_index", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("file", String, index=True),
+    Column("date", String, index=True),
+    Column("latitude", Float, index=True),
+    Column("longitude", Float, index=True),
+    Column("ocean", String, index=True),
+    Column("profiler_type", String),
+    Column("institution", String),
+    Column("date_update", String, index=True),
+)
+
+argo_measurements_table = Table(
+    "argo_measurements", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("float_id", String, index=True),
+    Column("profile_file", String, index=True),
+    Column("obs_time", DateTime, index=True),
+    Column("lat", Float, index=True),
+    Column("lon", Float, index=True),
+    Column("depth", Float, index=True),
+    Column("variable", String, index=True),
+    Column("value", Float),
+)
+
+metadata.create_all(engine)
+
+# small meta DB
+_user_conn = sqlite3.connect(USER_DB_PATH, check_same_thread=False)
+def _init_user_db(conn):
+    c = conn.cursor()
+    c.execute('CREATE TABLE IF NOT EXISTS chats (id INTEGER PRIMARY KEY, ts REAL, role TEXT, content TEXT)')
+    c.execute('CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY, ts REAL, question TEXT, snippet TEXT, label INTEGER)')
+    conn.commit()
+_init_user_db(_user_conn)
+
+# helpful indexes
+with engine.begin() as conn:
+    try:
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_argo_index_latlon ON argo_index(latitude, longitude)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_argo_index_date ON argo_index(date)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_argo_meas_time ON argo_measurements(obs_time)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_argo_meas_var ON argo_measurements(variable)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_argo_meas_latlon ON argo_measurements(lat, lon)"))
+    except Exception:
+        pass
+
+# status helpers
+def _write_status(status: str, info: Dict[str, Any] = None):
+    try:
+        payload = {"status": status, "info": info or {}, "ts": datetime.datetime.utcnow().isoformat() + "Z"}
+        with open(STATUS_FILE + ".tmp", "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+        os.replace(STATUS_FILE + ".tmp", STATUS_FILE)
+    except Exception:
+        pass
+
+def _read_status():
+    try:
+        if not os.path.exists(STATUS_FILE):
+            return {"status": "idle", "info": {}, "ts": None}
+        with open(STATUS_FILE, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {"status": "unknown", "info": {}, "ts": None}
+
+# requests session with retries
+from requests.adapters import HTTPAdapter, Retry
+SESSION = None
+def _requests_session_with_retries(total_retries=3, backoff=0.5, status_forcelist=(429,500,502,503,504)):
+    global SESSION
+    if SESSION is None:
+        s = requests.Session()
+        retries = Retry(total=total_retries, backoff_factor=backoff, status_forcelist=status_forcelist, raise_on_status=False)
+        s.mount("https://", HTTPAdapter(max_retries=retries))
+        s.mount("http://", HTTPAdapter(max_retries=retries))
+        SESSION = s
+    return SESSION
+
+# geocoding helper (Nominatim)
+def get_bbox_for_place(place_name: str, user_agent: str = "ARGO-RAG-Explorer/1.0 (+https://example.com)"):
+    session = _requests_session_with_retries()
+    url = "https://nominatim.openstreetmap.org/search"
+    headers = {"User-Agent": user_agent}
+    params = {"q": place_name, "format": "json", "limit": 1, "polygon_geojson": 0}
+    try:
+        r = session.get(url, params=params, headers=headers, timeout=10)
+        if r.status_code == 200:
+            j = r.json()
+            if isinstance(j, list) and len(j) > 0:
+                bb = j[0].get("boundingbox")
+                if bb and len(bb) == 4:
+                    lat_min = float(bb[0]); lat_max = float(bb[1])
+                    lon_min = float(bb[2]); lon_max = float(bb[3])
+                    return {"lat_min": lat_min, "lat_max": lat_max, "lon_min": lon_min, "lon_max": lon_max, "source": "nominatim"}
+    except Exception:
+        pass
+    if "arabian" in (place_name or "").lower():
+        return {"lat_min": -1.0, "lat_max": 30.0, "lon_min": 32.0, "lon_max": 78.0, "source": "fallback"}
+    return None
+
+# ensure models (optional)
+def ensure_models():
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY not set in .env")
+    if ChatGoogleGenerativeAI is None or GoogleGenerativeAIEmbeddings is None:
+        raise RuntimeError("langchain-google-genai is not installed")
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0, google_api_key=GEMINI_API_KEY)
+    emb = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GEMINI_API_KEY)
+    return llm, emb
+
+# index file helpers
+def ensure_index_file(local_path=INDEX_LOCAL_PATH, remote_url=INDEX_REMOTE_URL, timeout=60) -> str:
+    if os.path.exists(local_path) and os.path.getsize(local_path) > 100:
+        return local_path
+    session = _requests_session_with_retries()
+    r = session.get(remote_url, stream=True, timeout=timeout)
+    r.raise_for_status()
+    with open(local_path, "wb") as fh:
+        for chunk in r.iter_content(chunk_size=8192):
+            if chunk:
+                fh.write(chunk)
+    return local_path
+
+def parse_index_file(path=INDEX_LOCAL_PATH) -> pd.DataFrame:
+    rows = []
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.split(",")
+            if len(parts) < 8:
+                continue
+            try:
+                rows.append({
+                    "file": parts[0].strip(),
+                    "date": parts[1].strip(),
+                    "latitude": float(parts[2]) if parts[2] not in ("", "NA") else None,
+                    "longitude": float(parts[3]) if parts[3] not in ("", "NA") else None,
+                    "ocean": parts[4].strip(),
+                    "profiler_type": parts[5].strip(),
+                    "institution": parts[6].strip(),
+                    "date_update": parts[7].strip(),
+                })
+            except Exception:
+                pass
+    return pd.DataFrame(rows)
+
+def ingest_index_to_sqlite(df: pd.DataFrame) -> int:
+    if df is None or df.empty:
+        return 0
+    df.to_sql("argo_index", con=engine, if_exists="replace", index=False)
+    return len(df)
+
+def _safe_metadata_value(v: Any) -> Any:
+    if v is None:
+        return ""
+    if isinstance(v, (int, np.integer)):
+        return int(v)
+    if isinstance(v, (float, np.floating)):
+        try:
+            return float(v)
+        except Exception:
+            return str(v)
+    return str(v)
+
+# chroma builder (optional)
+def build_chroma_from_index(emb_model, user_id: int = 0, limit_rows: int = 1000):
+    if chromadb is None:
+        raise RuntimeError("chromadb not installed")
+    try:
+        client = chromadb.Client(Settings(
+            chroma_db_impl="duckdb+parquet",
+            persist_directory=os.path.join(CHROMA_DIR, f"user_{user_id}")
+        ))
+    except Exception:
+        client = chromadb.Client()
+    with engine.connect() as conn:
+        res = conn.execute(text("SELECT file, latitude, longitude, date FROM argo_index LIMIT :L"), {"L": limit_rows})
+        rows = res.fetchall()
+    if not rows:
+        return None
+    ids, docs, metas = [], [], []
+    for fp, lat, lon, date in rows:
+        fid = os.path.basename(fp) if fp else f"float_unknown_{len(ids)}"
+        fid = fid.replace('.nc', '')
+        ids.append(str(fid))
+        doc = f"Float {fid}"
+        if lat is not None and lon is not None:
+            doc += f" at {lat},{lon}"
+        if date:
+            doc += f" date {date}"
+        docs.append(doc)
+        metas.append({
+            "file": _safe_metadata_value(fp),
+            "mean_lat": _safe_metadata_value(lat),
+            "mean_lon": _safe_metadata_value(lon),
+            "date": _safe_metadata_value(date),
+        })
+    def safe_embed(emb_model, docs, chunk_size=64):
+        all_embs = []
+        for i in range(0, len(docs), chunk_size):
+            chunk = docs[i:i+chunk_size]
+            tries = 0
+            while True:
+                try:
+                    X = emb_model.embed_documents(chunk)
+                    for v in X:
+                        all_embs.append([float(x) for x in (list(v) if not isinstance(v, list) else v)])
+                    break
+                except Exception:
+                    tries += 1
+                    if tries > 3:
+                        for _ in chunk:
+                            all_embs.append([0.0])
+                        break
+                    time.sleep(2 ** tries)
+        return all_embs
+    embeddings = safe_embed(emb_model, docs)
+    coll_name = f"floats_user_{user_id}"
+    try:
+        coll = client.get_collection(name=coll_name)
+    except Exception:
+        coll = client.create_collection(name=coll_name)
+    coll.add(ids=[str(x) for x in ids], documents=docs, metadatas=metas, embeddings=embeddings)
+    try:
+        client.persist()
+    except Exception:
+        pass
+    return client
+
+# netCDF helpers
+def get_local_netcdf_path_from_indexfile(index_file: str) -> str:
+    return os.path.join(STORAGE_ROOT, index_file)
+
+def download_netcdf_for_index_path(index_file_path: str, dest_root: str = STORAGE_ROOT, timeout=60) -> str:
+    url = f"{IFREMER_BASE}/{index_file_path}"
+    local_dir = os.path.join(dest_root, os.path.dirname(index_file_path))
+    os.makedirs(local_dir, exist_ok=True)
+    local_path = os.path.join(local_dir, os.path.basename(index_file_path))
+    if os.path.exists(local_path) and os.path.getsize(local_path) > 1000:
+        return local_path
+    session = _requests_session_with_retries()
+    r = session.get(url, stream=True, timeout=timeout)
+    r.raise_for_status()
+    with tempfile.NamedTemporaryFile(delete=False, dir=local_dir) as tmp:
+        for chunk in r.iter_content(chunk_size=8192):
+            if chunk:
+                tmp.write(chunk)
+        tmp.flush()
+    os.replace(tmp.name, local_path)
+    return local_path
+
+def _to_float_array(x) -> np.ndarray:
+    if x is None:
+        return np.array([], dtype=float)
+    try:
+        arr = np.asarray(x)
+    except Exception:
+        try:
+            return np.asarray(pd.to_numeric(pd.Series(x).ravel(), errors="coerce"), dtype=float)
+        except Exception:
+            return np.array([], dtype=float)
+    flat = arr.ravel()
+    try:
+        conv = pd.to_numeric(flat, errors="coerce").astype(float).to_numpy()
+    except Exception:
+        out = []
+        for v in flat:
+            try:
+                out.append(float(v))
+            except Exception:
+                out.append(np.nan)
+        conv = np.asarray(out, dtype=float)
+    return conv
+
+def parse_profile_netcdf_to_rows(nc_path: str) -> List[Dict[str, Any]]:
+    try:
+        ds = xr.open_dataset(nc_path, decode_times=True, mask_and_scale=True, decode_cf=True)
+    except Exception as e:
+        print(f"parse_profile_netcdf_to_rows: open failed {nc_path}: {e}")
+        return []
+    fname = os.path.basename(nc_path)
+    float_id = fname.replace(".nc", "")
+
+    def choose_var(opts):
+        for o in opts:
+            if o in ds.variables:
+                return ds[o]
+        return None
+
+    lat_v = choose_var(['LATITUDE','latitude','lat','LAT'])
+    lon_v = choose_var(['LONGITUDE','longitude','lon','LON'])
+    time_v = choose_var(['JULD','time','TIME','juld','date'])
+    pres_v = choose_var(['PRES','pres','pressure','DEPTH','depth'])
+
+    candidate_vars = {}
+    for name in ds.data_vars:
+        nlow = name.lower()
+        if any(k in nlow for k in ['temp','psal','doxy','o2','chla','chlorophyll','nitrate','nitr','salin']):
+            candidate_vars[name] = ds[name]
+    if not candidate_vars:
+        for name in ds.data_vars:
+            if ds[name].ndim <= 2:
+                candidate_vars[name] = ds[name]
+    if not candidate_vars:
+        for name in ds.data_vars:
+            try:
+                flat = _to_float_array(ds[name].values)
+                if np.isfinite(flat).any():
+                    candidate_vars[name] = ds[name]
+            except Exception:
+                continue
+
+    rows = []
+    prof_dim = None
+    for d in ds.dims:
+        dl = d.lower()
+        if 'prof' in dl or 'trajectory' in dl or 'n_prof' in dl or 'nprof' in dl:
+            prof_dim = d
+            break
+
+    try:
+        if prof_dim is not None:
+            nprof = int(ds.dims[prof_dim])
+            for p in range(nprof):
+                try:
+                    latv = float(_to_float_array(lat_v.isel({prof_dim:p}).values).mean()) if lat_v is not None else None
+                except Exception:
+                    latv = None
+                try:
+                    lonv = float(_to_float_array(lon_v.isel({prof_dim:p}).values).mean()) if lon_v is not None else None
+                except Exception:
+                    lonv = None
+                try:
+                    traw = time_v.isel({prof_dim:p}).values if time_v is not None else None
+                    tval = pd.to_datetime(str(traw)) if traw is not None else None
+                except Exception:
+                    tval = None
+
+                depths = None
+                if pres_v is not None:
+                    try:
+                        depths = _to_float_array(pres_v.isel({prof_dim:p}).values) if prof_dim in pres_v.dims else _to_float_array(pres_v.values)
+                    except Exception:
+                        depths = None
+
+                for vname, var in candidate_vars.items():
+                    try:
+                        if prof_dim in var.dims:
+                            vals = _to_float_array(var.isel({prof_dim:p}).values)
+                        else:
+                            if var.ndim == 2:
+                                dims = list(var.dims)
+                                try:
+                                    cand = _to_float_array(var.isel({dims[0]: p}).values)
+                                    vals = cand if np.isfinite(cand).any() else _to_float_array(var.isel({dims[1]: p}).values)
+                                except Exception:
+                                    vals = _to_float_array(var.values)
+                            else:
+                                vals = _to_float_array(var.values)
+                    except Exception:
+                        continue
+
+                    if depths is None or len(depths) == 0:
+                        for i, val in enumerate(np.atleast_1d(vals)):
+                            if not np.isfinite(val): continue
+                            rows.append({
+                                "float_id": float_id,
+                                "profile_file": os.path.relpath(nc_path, STORAGE_ROOT),
+                                "obs_time": pd.to_datetime(tval).to_pydatetime() if tval is not None else None,
+                                "lat": latv, "lon": lonv,
+                                "depth": float(i),
+                                "variable": vname,
+                                "value": float(val)
+                            })
+                    else:
+                        for dpt, val in zip(np.atleast_1d(depths), np.atleast_1d(vals)):
+                            if not np.isfinite(val): continue
+                            dv = float(dpt) if np.isfinite(dpt) else None
+                            rows.append({
+                                "float_id": float_id,
+                                "profile_file": os.path.relpath(nc_path, STORAGE_ROOT),
+                                "obs_time": pd.to_datetime(tval).to_pydatetime() if tval is not None else None,
+                                "lat": latv, "lon": lonv,
+                                "depth": dv,
+                                "variable": vname,
+                                "value": float(val)
+                            })
+        else:
+            try:
+                latv = float(_to_float_array(lat_v.values).mean()) if lat_v is not None else None
+            except Exception:
+                latv = None
+            try:
+                lonv = float(_to_float_array(lon_v.values).mean()) if lon_v is not None else None
+            except Exception:
+                lonv = None
+            try:
+                tval = pd.to_datetime(str(time_v.values)) if time_v is not None else None
+            except Exception:
+                tval = None
+
+            depths = None
+            if pres_v is not None:
+                try:
+                    depths = _to_float_array(pres_v.values)
+                except Exception:
+                    depths = None
+
+            for vname, var in candidate_vars.items():
+                try:
+                    vals = _to_float_array(var.values)
+                except Exception:
+                    continue
+                if depths is None or len(depths) == 0:
+                    for i, val in enumerate(np.atleast_1d(vals)):
+                        if not np.isfinite(val): continue
+                        rows.append({
+                            "float_id": float_id,
+                            "profile_file": os.path.relpath(nc_path, STORAGE_ROOT),
+                            "obs_time": pd.to_datetime(tval).to_pydatetime() if tval is not None else None,
+                            "lat": latv, "lon": lonv,
+                            "depth": float(i),
+                            "variable": vname,
+                            "value": float(val)
+                        })
+                else:
+                    for dpt, val in zip(np.atleast_1d(depths), np.atleast_1d(vals)):
+                        if not np.isfinite(val): continue
+                        dv = float(dpt) if np.isfinite(dpt) else None
+                        rows.append({
+                            "float_id": float_id,
+                            "profile_file": os.path.relpath(nc_path, STORAGE_ROOT),
+                            "obs_time": pd.to_datetime(tval).to_pydatetime() if tval is not None else None,
+                            "lat": latv, "lon": lonv,
+                            "depth": dv,
+                            "variable": vname,
+                            "value": float(val)
+                        })
+    finally:
+        try:
+            ds.close()
+        except Exception:
+            pass
+
+    return rows
+
+def read_netcdf_variables_to_df(nc_path: str, prof_index: int = 0) -> pd.DataFrame:
+    """Extract depth/temp/psal arrays from a .nc into a small DataFrame preview."""
+    try:
+        ds = xr.open_dataset(nc_path, decode_times=True, mask_and_scale=True, decode_cf=True)
+    except Exception as e:
+        print(f"read_netcdf_variables_to_df: failed to open {nc_path}: {e}")
+        return pd.DataFrame()
+
+    def find_first(subs):
+        for name in ds.data_vars:
+            nl = name.lower()
+            if any(s in nl for s in subs):
+                return name
+        return None
+
+    depth_name = find_first(['pres','depth','pressure'])
+    temp_name = find_first(['temp','theta'])
+    psal_name = find_first(['psal','salin','sal'])
+
+    def extract_1d(name):
+        if not name or name not in ds.variables:
+            return np.array([], dtype=float)
+        var = ds[name]
+        try:
+            dims = list(var.dims)
+            if len(dims) == 0:
+                return _to_float_array(var.values)
+            if len(dims) == 1:
+                return _to_float_array(var.values)
+            if len(dims) == 2:
+                prof_dim = None
+                for d in dims:
+                    if 'prof' in d.lower() or 'trajectory' in d.lower():
+                        prof_dim = d; break
+                if prof_dim is not None:
+                    return _to_float_array(var.isel({prof_dim: prof_index}).values)
+                try:
+                    cand = _to_float_array(var.isel({dims[0]: prof_index}).values)
+                    if np.isfinite(cand).any(): return cand
+                except Exception: pass
+                try:
+                    cand2 = _to_float_array(var.isel({dims[1]: prof_index}).values)
+                    if np.isfinite(cand2).any(): return cand2
+                except Exception: pass
+                return _to_float_array(var.values).ravel()
+            return _to_float_array(var.values).ravel()
+        except Exception:
+            return _to_float_array(var.values).ravel()
+
+    depth = extract_1d(depth_name)
+    temp = extract_1d(temp_name)
+    psal = extract_1d(psal_name)
+
+    n = 0
+    for arr in (depth, temp, psal):
+        if getattr(arr, "size", 0) > n:
+            n = int(arr.size)
+    if n == 0:
+        ds.close()
+        return pd.DataFrame()
+
+    rows = []
+    for i in range(n):
+        d = depth[i] if i < len(depth) else np.nan
+        t = temp[i] if i < len(temp) else np.nan
+        s = psal[i] if i < len(psal) else np.nan
+        rows.append({"depth": (float(d) if np.isfinite(d) else None),
+                     "temp": (float(t) if np.isfinite(t) else None),
+                     "psal": (float(s) if np.isfinite(s) else None)})
+    ds.close()
+    df = pd.DataFrame(rows)
+    df = df.dropna(how='all', subset=["depth","temp","psal"]).reset_index(drop=True)
+    return df
+
+# ingest measurement rows into DB
+def ingest_measurement_rows(rows: List[Dict[str, Any]]) -> int:
+    if not rows:
+        return 0
+    inserted = 0
+    with engine.begin() as conn:
+        batch = []
+        for r in rows:
+            if isinstance(r.get("obs_time"), (pd.Timestamp, np.datetime64)):
+                try:
+                    r["obs_time"] = pd.to_datetime(r["obs_time"]).to_pydatetime()
+                except Exception:
+                    r["obs_time"] = None
+            batch.append(r)
+            if len(batch) >= 500:
+                conn.execute(argo_measurements_table.insert(), batch)
+                inserted += len(batch)
+                batch = []
+        if batch:
+            conn.execute(argo_measurements_table.insert(), batch)
+            inserted += len(batch)
+    return inserted
+
+# SQL builder + parsing helpers
+ALLOWED_VAR_SUBSTR = ["temp", "psal", "doxy", "o2", "chla", "oxygen", "salin"]
+
+def safe_sql_builder(filters: Dict[str, Any], target: str = "index") -> Tuple[str, Dict[str, Any]]:
+    where = []
+    params = {}
+    filters = filters or {}
+    def to_float(x):
+        try:
+            return float(x)
+        except Exception:
+            return None
+    lat_min = filters.get("lat_min"); lat_max = filters.get("lat_max")
+    lon_min = filters.get("lon_min"); lon_max = filters.get("lon_max")
+
+    if target == "index":
+        if lat_min is not None and (v := to_float(lat_min)) is not None:
+            where.append("latitude >= :lat_min"); params["lat_min"] = v
+        if lat_max is not None and (v := to_float(lat_max)) is not None:
+            where.append("latitude <= :lat_max"); params["lat_max"] = v
+        if lon_min is not None and (v := to_float(lon_min)) is not None:
+            where.append("longitude >= :lon_min"); params["lon_min"] = v
+        if lon_max is not None and (v := to_float(lon_max)) is not None:
+            where.append("longitude <= :lon_max"); params["lon_max"] = v
+    else:
+        if lat_min is not None and (v := to_float(lat_min)) is not None:
+            where.append("m.lat >= :lat_min"); params["lat_min"] = v
+        if lat_max is not None and (v := to_float(lat_max)) is not None:
+            where.append("m.lat <= :lat_max"); params["lat_max"] = v
+        if lon_min is not None and (v := to_float(lon_min)) is not None:
+            where.append("m.lon >= :lon_min"); params["lon_min"] = v
+        if lon_max is not None and (v := to_float(lon_max)) is not None:
+            where.append("m.lon <= :lon_max"); params["lon_max"] = v
+
+    def parse_ts(x):
+        if not x:
+            return None
+        try:
+            dt = pd.to_datetime(x)
+        except Exception:
+            return None
+        try:
+            py = dt.to_pydatetime()
+        except Exception:
+            return dt.isoformat()
+        if getattr(py, "tzinfo", None) is not None:
+            py = py.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        return py
+    t0 = parse_ts(filters.get("time_start"))
+    t1 = parse_ts(filters.get("time_end"))
+    if target == "index":
+        if t0 is not None:
+            where.append("date >= :t0"); params["t0"] = t0.strftime("%Y%m%d%H%M%S") if isinstance(t0, datetime.datetime) else str(t0)
+        if t1 is not None:
+            where.append("date <= :t1"); params["t1"] = t1.strftime("%Y%m%d%H%M%S") if isinstance(t1, datetime.datetime) else str(t1)
+        ocean = (filters.get("ocean") or "").strip()
+        if ocean:
+            where.append("ocean = :ocean"); params["ocean"] = ocean
+        institution = (filters.get("institution") or "").strip()
+        if institution:
+            where.append("upper(institution) = upper(:institution)"); params["institution"] = institution
+    else:
+        if t0 is not None:
+            where.append("m.obs_time >= :t0_dt"); params["t0_dt"] = t0
+        if t1 is not None:
+            where.append("m.obs_time <= :t1_dt"); params["t1_dt"] = t1
+        var = (filters.get("variable") or "").lower().strip()
+        if var and any(s in var for s in ALLOWED_VAR_SUBSTR):
+            where.append("lower(m.variable) LIKE :var"); params["var"] = f"%{var}%"
+        institution = (filters.get("institution") or "").strip()
+        if institution:
+            where.append("upper(i.institution) = upper(:institution)"); params["institution"] = institution
+
+    limit = filters.get("limit") or 500
+    try:
+        limit = int(limit)
+        if limit <= 0 or limit > 10000:
+            limit = 500
+    except Exception:
+        limit = 500
+    where_clause = " AND ".join(where) if where else "1=1"
+    if target == "index":
+        sql = f"SELECT * FROM argo_index WHERE {where_clause} ORDER BY date DESC LIMIT {limit}"
+    else:
+        if "institution" in params:
+            sql = f"SELECT m.* FROM argo_measurements m JOIN argo_index i ON m.profile_file = i.file WHERE {where_clause} ORDER BY m.obs_time DESC LIMIT {limit}"
+        else:
+            sql = f"SELECT m.* FROM argo_measurements m WHERE {where_clause} ORDER BY m.obs_time DESC LIMIT {limit}"
+    return sql, params
+
+# fallback parser
+def _simple_parse_question(question: str) -> Dict[str, Any]:
+    q = (question or "").lower()
+    parsed = {"action": "answer", "filters": {}}
+    if any(k in q for k in ["list float", "list floats", "floats in", "show floats", "find floats"]):
+        parsed["action"] = "index"
+        if "indian" in q:
+            parsed["filters"]["ocean"] = "I"
+        elif "atlantic" in q:
+            parsed["filters"]["ocean"] = "A"
+        elif "pacific" in q:
+            parsed["filters"]["ocean"] = "P"
+        elif "southern" in q or "antarctic" in q:
+            parsed["filters"]["ocean"] = "S"
+        return parsed
+    for var in ALLOWED_VAR_SUBSTR + ["salinity", "temperature"]:
+        if var in q:
+            parsed["action"] = "measurements"
+            parsed["filters"]["variable"] = var
+            break
+    latm = re.search(r"([0-9]{1,2}(?:\.[0-9]+)?)\s*[°º]?\s*([nNsS])", question)
+    lonm = re.search(r"([0-9]{1,3}(?:\.[0-9]+)?)\s*[°º]?\s*([eEwW])", question)
+    if latm:
+        lat = float(latm.group(1))
+        if latm.group(2).lower() == "s":
+            lat = -lat
+        parsed["filters"]["lat_min"] = lat - 0.5
+        parsed["filters"]["lat_max"] = lat + 0.5
+    if lonm:
+        lon = float(lonm.group(1))
+        if lonm.group(2).lower() == "w":
+            lon = -lon
+        parsed["filters"]["lon_min"] = lon - 0.5
+        parsed["filters"]["lon_max"] = lon + 0.5
+    if parsed["action"] == "answer":
+        parsed["action"] = "index"
+    return parsed
+
+def llm_to_structured(llm, question: str) -> Dict[str, Any]:
+    if llm is None:
+        return _simple_parse_question(question)
+    prompt = (
+        "You are a strict parser. Convert the user's question into JSON: "
+        "{action: 'index'|'measurements'|'answer', "
+        "filters:{lat_min,lat_max,lon_min,lon_max,time_start,time_end,ocean,variable,institution,limit}}. "
+        "Respond ONLY with JSON. Use ISO8601 timestamps or null. "
+        "User question: " + question
+    )
+    try:
+        r = llm.invoke(prompt)
+        out = getattr(r, "content", str(r))
+        m = re.search(r"\{[\s\S]*\}", out)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except Exception:
+                return _simple_parse_question(question)
+    except Exception:
+        pass
+    return _simple_parse_question(question)
+
+# ask_argo_question: uses .nc previews first for temp-like queries then falls back to DB
+def ask_argo_question(llm, emb_model, question: str, user_id: int = 0) -> Dict[str, Any]:
+    out = {"action": None, "parsed": None, "sql_index": None, "index_rows": None,
+           "sql_measurements": None, "measurement_rows": None, "nc_previews": {}, "explanation": None}
+    if llm is not None:
+        parsed = llm_to_structured(llm, question)
+    else:
+        parsed = _simple_parse_question(question)
+    out["parsed"] = parsed
+
+    # auto-geocode if missing
+    try:
+        have_latlon = any(k in parsed.get("filters", {}) for k in ("lat_min","lat_max","lon_min","lon_max"))
+        if not have_latlon and question and question.strip():
+            bbox = get_bbox_for_place(question.strip())
+            if bbox:
+                filters = parsed.get("filters", {}) or {}
+                filters.update({
+                    "lat_min": bbox["lat_min"], "lat_max": bbox["lat_max"],
+                    "lon_min": bbox["lon_min"], "lon_max": bbox["lon_max"],
+                })
+                parsed["filters"] = filters
+                out["parsed"] = parsed
+    except Exception:
+        pass
+
+    action = parsed.get("action", "answer")
+    filters = parsed.get("filters", {}) or {}
+    out["action"] = action
+
+    # index query
+    try:
+        sql_index, params_index = safe_sql_builder(filters, target="index")
+        out["sql_index"] = sql_index
+        with engine.connect() as conn:
+            res = conn.execute(text(sql_index), params_index)
+            df_index = pd.DataFrame(res.fetchall(), columns=res.keys())
+        out["index_rows"] = df_index
+    except Exception as e:
+        out["explanation"] = f"Index query failed: {e}"
+        return out
+
+    # when measurements requested and variable is temp/psal-like, prefer .nc
+    var_val = (filters.get("variable") or "").lower()
+    wants_nc_preferred = False
+    if action == "measurements" and var_val:
+        if any(s in var_val for s in ALLOWED_VAR_SUBSTR):
+            wants_nc_preferred = True
+
+    nc_previews = {}
+    if wants_nc_preferred and out["index_rows"] is not None and not out["index_rows"].empty:
+        for _, row in out["index_rows"].iterrows():
+            fpath = row.get("file")
+            if not fpath:
+                continue
+            local = get_local_netcdf_path_from_indexfile(fpath)
+            if not os.path.exists(local):
+                try:
+                    local = download_netcdf_for_index_path(fpath)
+                except Exception:
+                    local = None
+            if local and os.path.exists(local):
+                try:
+                    df_nc = read_netcdf_variables_to_df(local, prof_index=0)
+                    if df_nc is not None and not df_nc.empty:
+                        fid = os.path.basename(fpath).replace('.nc','')
+                        nc_previews[fid] = {"file": fpath, "preview": df_nc}
+                except Exception:
+                    pass
+    out["nc_previews"] = nc_previews
+
+    # If .nc previews present and user asked for temp/psal, use them
+    if wants_nc_preferred and nc_previews:
+        combined = []
+        for fid, info in nc_previews.items():
+            dfp = info["preview"].copy()
+            dfp["float_id"] = fid
+            dfp["file"] = info["file"]
+            combined.append(dfp)
+        if combined:
+            df_combined = pd.concat(combined, ignore_index=True, sort=False)
+            out["explanation"] = f"Found {len(nc_previews)} .nc previews (used as primary source for requested variable)."
+            out["measurement_rows"] = df_combined
+            out["sql_measurements"] = None
+            return out
+
+    # fallback to DB measurements
+    try:
+        sql_meas, params_meas = safe_sql_builder(filters, target="measurements")
+        out["sql_measurements"] = sql_meas
+        with engine.connect() as conn:
+            res = conn.execute(text(sql_meas), params_meas)
+            df_meas = pd.DataFrame(res.fetchall(), columns=res.keys())
+        out["measurement_rows"] = df_meas
+        if df_meas.empty:
+            out["explanation"] = "No measurement rows matched your query (and no suitable .nc previews were found)."
+        else:
+            out["explanation"] = f"Found {len(df_meas)} measurement rows from DB."
+    except Exception as e:
+        out["explanation"] = f"Measurement query failed: {e}"
+    return out
+
+# background workers
+def _chroma_build_worker(limit_rows, user_id=0):
+    _write_status('building_chroma', {'limit_rows': int(limit_rows)})
+    try:
+        llm, emb = ensure_models()
+        build_chroma_from_index(emb, user_id=int(user_id), limit_rows=int(limit_rows))
+        _write_status('chroma_done', {'limit_rows': int(limit_rows)})
+    except Exception as e:
+        _write_status('chroma_error', {'error': str(e)})
+
+def start_chroma_build_async(limit_rows, user_id=0):
+    p = multiprocessing.Process(target=_chroma_build_worker, args=(int(limit_rows), int(user_id)), daemon=True)
+    p.start()
+    _write_status('chroma_started', {'pid': p.pid, 'limit_rows': int(limit_rows)})
+    return p.pid
+
+def _index_ingest_worker():
+    _write_status('ingesting_index', {})
+    try:
+        local = ensure_index_file()
+        df = parse_index_file(local)
+        n = ingest_index_to_sqlite(df)
+        _write_status('index_done', {'rows': int(n)})
+    except Exception as e:
+        _write_status('index_error', {'error': str(e)})
+
+def start_index_ingest_async():
+    p = multiprocessing.Process(target=_index_ingest_worker, daemon=True)
+    p.start()
+    _write_status('index_started', {'pid': p.pid})
+    return p.pid
+
+# haversine & nearest helper
+def haversine_np(lat1, lon1, lat2, lon2):
+    lat1r = np.radians(lat1)
+    lon1r = np.radians(lon1)
+    lat2r = np.radians(lat2)
+    lon2r = np.radians(lon2)
+    dlat = lat2r - lat1r
+    dlon = lon2r - lon1r
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1r) * np.cos(lat2r) * np.sin(dlon / 2.0) ** 2
+    c = 2 * np.arcsin(np.minimum(1, np.sqrt(a)))
+    R = 6371.0
+    return R * c
+
+def nearest_floats(lat0: float, lon0: float, limit: int = 10, max_candidates: int = 10000) -> pd.DataFrame:
+    with engine.connect() as conn:
+        res = conn.execute(text("SELECT file, latitude, longitude, date, ocean, profiler_type, institution FROM argo_index WHERE latitude IS NOT NULL AND longitude IS NOT NULL LIMIT :L"), {"L": max_candidates})
+        df = pd.DataFrame(res.fetchall(), columns=res.keys())
+    if df.empty:
+        return df
+    df = df.dropna(subset=["latitude", "longitude"]).copy()
+    df["latitude"] = pd.to_numeric(df["latitude"], errors='coerce')
+    df["longitude"] = pd.to_numeric(df["longitude"], errors='coerce')
+    df = df.dropna(subset=["latitude", "longitude"])
+    if df.empty:
+        return df
+    df["distance_km"] = haversine_np(lat0, lon0, df["latitude"].values, df["longitude"].values)
+    df = df.sort_values("distance_km").reset_index(drop=True)
+    return df.head(limit)
+
+def get_measurements_for_float(float_id: str, variable_hint: Optional[str] = None) -> pd.DataFrame:
+    with engine.connect() as conn:
+        if variable_hint:
+            res = conn.execute(text("SELECT obs_time, lat, lon, depth, variable, value FROM argo_measurements WHERE float_id = :fid AND lower(variable) LIKE :v ORDER BY depth ASC"), {"fid": float_id, "v": f"%{variable_hint.lower()}%"})
+        else:
+            res = conn.execute(text("SELECT obs_time, lat, lon, depth, variable, value FROM argo_measurements WHERE float_id = :fid ORDER BY depth ASC"), {"fid": float_id})
+        df = pd.DataFrame(res.fetchall(), columns=res.keys())
+    if df.empty:
+        return df
+    df["obs_time"] = pd.to_datetime(df["obs_time"])
+    return df
+
+def find_common_vars_for_floats(float_ids: List[str]) -> Dict[str, str]:
+    var_counts = {}
+    with engine.connect() as conn:
+        for fid in float_ids:
+            res = conn.execute(text("SELECT DISTINCT variable FROM argo_measurements WHERE float_id = :fid"), {"fid": fid})
+            for (v,) in res.fetchall():
+                if not v: continue
+                nlow = v.lower()
+                var_counts.setdefault(nlow, set()).add(fid)
+    mapping = {}
+    for name in var_counts.keys():
+        if any(k in name for k in ["temp", "theta"]):
+            mapping.setdefault("temp", name)
+        if any(k in name for k in ["psal", "salin"]):
+            mapping.setdefault("psal", name)
+    return mapping
+
+# -----------------------------
+# Streamlit UI
+# -----------------------------
+# optional folium for maps
+try:
+    import folium
+    from folium.plugins import MarkerCluster
+    from streamlit_folium import st_folium
+    FOLIUM_AVAILABLE = True
+except Exception:
+    folium = None
+    MarkerCluster = None
+    st_folium = None
+    FOLIUM_AVAILABLE = False
+
+st.set_page_config(page_title="ARGO RAG Explorer", layout="wide")
+st.title("ARGO RAG Explorer — Nearest floats, Tracks & Profile comparison")
+
+st.sidebar.header("Config")
+st.sidebar.write(f"SQLite: `{DB_PATH}`")
+st.sidebar.write(f"Storage: `{STORAGE_ROOT}`")
+
+if st.sidebar.button("Ensure index downloaded & ingested (async)", key="ensure_index_btn"):
+    try:
+        pid = start_index_ingest_async()
+        st.sidebar.success(f"Index ingest started (pid {pid}). Refresh status below to see progress.")
+    except Exception as e:
+        st.sidebar.error(f"Failed to start index ingest: {e}")
+
+st.sidebar.markdown("**Chroma build options**")
+rows_to_index = int(st.sidebar.number_input("Rows to index (Chroma)", min_value=10, max_value=500000, value=1000, step=10))
+if st.sidebar.button("(Re)build Chroma float index (first N rows) (async)", key="rebuild_chroma"):
+    if ChatGoogleGenerativeAI is None or GoogleGenerativeAIEmbeddings is None:
+        st.sidebar.warning("Embeddings are required to build Chroma. Set GEMINI_API_KEY and install embedding package.")
+    elif chromadb is None:
+        st.sidebar.warning("chromadb not installed.")
+    else:
+        try:
+            pid = start_chroma_build_async(rows_to_index, user_id=0)
+            st.sidebar.success(f"Chroma build started (pid {pid}). Refresh status below to see progress.")
+        except Exception as e:
+            st.sidebar.error(f"Chroma build failed to start: {e}")
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Background job status")
+status = _read_status()
+try:
+    st.sidebar.json(status)
+except Exception:
+    st.sidebar.code(json.dumps(status, indent=2))
+
+if st.sidebar.button("Refresh status"):
+    st.sidebar.success("Status refreshed.")
+
+tabs = st.tabs(["Nearest ARGO floats", "Explore Index", "Ingest Profiles", "Chat", "Trajectories & Profile comparison", "Exports"])
+
+if "last_index_df" not in st.session_state:
+    st.session_state["last_index_df"] = pd.DataFrame()
+
+# --- Nearest tab ---
+with tabs[0]:
+    st.header("Nearest ARGO floats to a coordinate")
+    c1, c2, c3 = st.columns([3,2,1])
+    lat0 = c1.number_input("Latitude", value=15.0, format="%f", key="nearest_lat")
+    lon0 = c2.number_input("Longitude", value=72.0, format="%f", key="nearest_lon")
+    nlimit = c3.number_input("Limit", min_value=1, max_value=200, value=10, key="nearest_limit")
+
+    if "nearest_query" not in st.session_state:
+        st.session_state["nearest_query"] = None
+    if "nearest_df" not in st.session_state:
+        st.session_state["nearest_df"] = pd.DataFrame()
+
+    if st.button("Find nearest floats", key="nearest_find"):
+        try:
+            df_near = nearest_floats(lat0, lon0, limit=int(nlimit))
+            st.session_state["nearest_df"] = df_near
+            st.session_state["nearest_query"] = {"lat": float(lat0), "lon": float(lon0)}
+        except Exception as e:
+            st.error(f"Nearest lookup failed: {e}")
+
+    df_near = st.session_state.get("nearest_df", pd.DataFrame())
+    nq = st.session_state.get("nearest_query")
+    if not df_near.empty:
+        st.write(df_near[["file","latitude","longitude","date","distance_km","institution"]].head(50))
+        df_map = df_near.dropna(subset=["latitude","longitude"])[:2000]
+        if not df_map.empty:
+            try:
+                fig = px.scatter_geo(df_map, lat='latitude', lon='longitude', hover_name='file', size='distance_km')
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception:
+                st.write("Map rendering failed.")
+    else:
+        st.info("No nearest-floats result yet. Press 'Find nearest floats' after entering coordinates.")
+
+# --- Explore Index ---
+with tabs[1]:
+    st.header("Explore ARGO index (SQLite)")
+    try:
+        idx_count = 0
+        inspector = inspect(engine)
+        if inspector.has_table("argo_index"):
+            with engine.connect() as conn:
+                idx_count = int(conn.execute(text("SELECT COUNT(*) FROM argo_index")).scalar() or 0)
+    except Exception:
+        idx_count = 0
+    try:
+        with engine.connect() as conn:
+            meas_count = conn.execute(text("SELECT COUNT(*) FROM argo_measurements")).scalar()
+            meas_count = int(meas_count) if meas_count is not None else 0
+    except Exception:
+        meas_count = 0
+    st.caption(f"Index rows available: {idx_count} — Measurement rows ingested: {meas_count}")
+
+    with st.expander("Filters"):
+        with st.form(key="index_filter_form"):
+            c1, c2, c3 = st.columns(3)
+            lat_min = c1.number_input("lat_min", value=-90.0, format="%f")
+            lat_max = c1.number_input("lat_max", value=90.0, format="%f")
+            lon_min = c2.number_input("lon_min", value=-180.0, format="%f")
+            lon_max = c2.number_input("lon_max", value=180.0, format="%f")
+            ocean = c3.text_input("ocean (A/P/I/S)", value="")
+            institution = c3.text_input("institution (e.g. AO, IN)", value="")
+            date_from = c1.text_input("date_from (YYYYMMDDHHMMSS)", value="")
+            date_to = c2.text_input("date_to (YYYYMMDDHHMMSS)", value="")
+            limit = c3.number_input("limit", min_value=1, max_value=5000, value=500)
+            run = st.form_submit_button("Run index query")
+
+        if run:
+            filters = {"lat_min": lat_min, "lat_max": lat_max, "lon_min": lon_min, "lon_max": lon_max,
+                       "ocean": ocean.strip() or None, "institution": institution.strip() or None,
+                       "time_start": date_from or None, "time_end": date_to or None,
+                       "limit": limit}
+            sql, params = safe_sql_builder(filters, target="index")
+            try:
+                with engine.connect() as conn:
+                    res = conn.execute(text(sql), params)
+                    df = pd.DataFrame(res.fetchall(), columns=res.keys())
+            except Exception as e:
+                st.error(f"Query failed: {e}")
+                df = pd.DataFrame()
+            st.write(f"Returned rows: {len(df)}")
+            if not df.empty:
+                st.session_state["last_index_df"] = df
+                st.session_state["last_index_query"] = {"filters": filters}
+                st.dataframe(df.head(200))
+                df_map = df.dropna(subset=["latitude", "longitude"])[:2000]
+                if not df_map.empty:
+                    fig = px.scatter_geo(df_map, lat="latitude", lon="longitude", hover_name="file", scope="world")
+                    st.plotly_chart(fig, use_container_width=True)
+
+# --- Ingest Profiles ---
+with tabs[2]:
+    st.header("Bulk ingest by manual index paths")
+    st.markdown("Paste index file paths (one per line), e.g. `aoml/13857/profiles/R13857_001.nc`")
+    paths_text = st.text_area("Index file paths", height=160)
+    max_files = st.number_input("Max files to download", min_value=1, max_value=200, value=10, key="bulk_max_files")
+    if st.button("Download & ingest paths", key="bulk_ingest"):
+        lines = [l.strip() for l in paths_text.splitlines() if l.strip()]
+        lines = lines[:max_files]
+        total = 0
+        for p in lines:
+            try:
+                local_nc = download_netcdf_for_index_path(p)
+                rows = parse_profile_netcdf_to_rows(local_nc)
+                n = ingest_measurement_rows(rows)
+                total += n
+                st.success(f"Ingested {n} rows from {p}")
+            except Exception as e:
+                st.error(f"Failed {p}: {e}")
+        st.info(f"Total measurement rows ingested: {total}")
+
+# --- Chat ---
+with tabs[3]:
+    st.header("Chat with ARGO data (RAG)")
+    have_models = True
+    llm = None
+    emb = None
+    try:
+        llm, emb = ensure_models()
+    except Exception as e:
+        have_models = False
+        st.info("LLM/Embeddings not available; using fallback parser.")
+
+    mode = st.radio("Mode", ["Auto (LLM if available)", "LLM (force)", "Fallback (rule-based)"], index=0)
+    question = st.text_area("Ask (e.g., 'temperature near 15N 72E in 2023', 'list floats in Indian Ocean')", height=140)
+
+    st.markdown("---")
+    st.subheader("Place lookup (optional)")
+    pcol1, pcol2, pcol3 = st.columns([3,1,1])
+    place_name = pcol1.text_input("Place name (e.g., 'Arabian Sea')", value="Arabian Sea", key="chat_place_name")
+    place_year = pcol2.text_input("Year (optional, YYYY)", value="", key="chat_place_year")
+    place_limit = pcol3.number_input("Limit", min_value=1, max_value=5000, value=200, key="chat_place_limit")
+    place_institution = st.text_input("Institution (optional, e.g., AO)", key="chat_place_institution")
+
+    if st.button("Find place lat/lon and nearby ARGO floats", key="chat_place_find"):
+        if not place_name.strip():
+            st.warning("Type a place name.")
+        else:
+            with st.spinner("Resolving place and searching index..."):
+                bbox = get_bbox_for_place(place_name.strip())
+                if bbox is None:
+                    st.error("Could not resolve place name and no fallback available.")
+                else:
+                    lat_c = (bbox["lat_min"] + bbox["lat_max"]) / 2.0
+                    lon_c = (bbox["lon_min"] + bbox["lon_max"]) / 2.0
+                    st.success(f"Place resolved (source: {bbox.get('source','unknown')}). Center: {lat_c:.4f}, {lon_c:.4f}")
+                    st.info(f"Bounding box: lat [{bbox['lat_min']}, {bbox['lat_max']}], lon [{bbox['lon_min']}, {bbox['lon_max']}]")
+
+                    filters = {
+                        "lat_min": bbox["lat_min"], "lat_max": bbox["lat_max"],
+                        "lon_min": bbox["lon_min"], "lon_max": bbox["lon_max"],
+                        "institution": place_institution.strip() or None,
+                        "limit": int(place_limit)
+                    }
+                    if place_year and re.match(r"^\d{4}$", place_year.strip()):
+                        y = int(place_year.strip())
+                        filters["time_start"] = f"{y:04d}0101000000"
+                        filters["time_end"] = f"{y:04d}1231235959"
+
+                    sql, params = safe_sql_builder(filters, target="index")
+                    try:
+                        with engine.connect() as conn:
+                            res = conn.execute(text(sql), params)
+                            df = pd.DataFrame(res.fetchall(), columns=res.keys())
+                    except Exception as e:
+                        st.error(f"Query failed: {e}")
+                        df = pd.DataFrame()
+
+                    st.session_state["chat_place_df"] = df
+                    st.session_state["chat_place_center"] = (lat_c, lon_c)
+
+    chat_df = st.session_state.get("chat_place_df", pd.DataFrame())
+    chat_center = st.session_state.get("chat_place_center")
+    st.write(f"Returned rows: {len(chat_df)}")
+    if not chat_df.empty:
+        st.dataframe(chat_df.head(200))
+        df_map = chat_df.dropna(subset=["latitude", "longitude"])[:2000]
+        if not df_map.empty:
+            try:
+                fig = px.scatter_geo(df_map, lat='latitude', lon='longitude', hover_name='file')
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception:
+                st.write("Map render failed.")
+
+    if st.button("Ask", key="ask_btn"):
+        if mode == "LLM (force)" and not have_models:
+            st.error("LLM not available.")
+        else:
+            use_llm = (mode == "Auto (LLM if available)" and have_models) or (mode == "LLM (force)" and have_models)
+            llm_obj = llm if use_llm else None
+            emb_obj = emb if have_models else None
+            if not question.strip():
+                st.warning("Type a question.")
+            else:
+                with st.spinner("Processing..."):
+                    out = ask_argo_question(llm_obj, emb_obj, question, user_id=0)
+                st.subheader("Answer / Explanation")
+                st.write(out.get("explanation", ""))
+                st.markdown("**Parsed filters (debug)**")
+                try:
+                    st.json(out.get("parsed", {}))
+                except Exception:
+                    st.write(out.get("parsed", {}))
+
+                st.markdown("### Index rows (matched floats/files)")
+                idx = out.get("index_rows")
+                if isinstance(idx, pd.DataFrame) and not idx.empty:
+                    st.dataframe(idx.head(200))
+                else:
+                    st.write("No index rows matched.")
+
+                st.markdown("### Measurement rows used (DB or .nc previews)")
+                meas = out.get("measurement_rows")
+                if isinstance(meas, pd.DataFrame) and not meas.empty:
+                    st.dataframe(meas.head(200))
+                    st.download_button("Download results as CSV", meas.to_csv(index=False).encode("utf-8"), file_name="argo_query_results.csv")
+                else:
+                    st.write("No measurement rows returned.")
+
+                st.markdown("### .nc previews (if used or available)")
+                nc_previews = out.get("nc_previews", {}) or {}
+                if nc_previews:
+                    for fid, info in nc_previews.items():
+                        st.markdown(f"**{fid}** — `{info.get('file')}`")
+                        dfp = info.get("preview")
+                        if isinstance(dfp, pd.DataFrame) and not dfp.empty:
+                            st.dataframe(dfp.head(200))
+                            st.download_button(f"Download {fid} .nc preview CSV", dfp.to_csv(index=False).encode("utf-8"), file_name=f"{fid}_preview.csv")
+                        else:
+                            st.write("Preview empty.")
+                else:
+                    st.write("No .nc previews available for matched index rows.")
+
+# --- Trajectories & Profile comparison ---
+with tabs[4]:
+    st.header("Profile & Index metadata comparison")
+    candidate_floats = []
+    if not st.session_state.get("last_index_df", pd.DataFrame()).empty:
+        candidate_floats = [os.path.basename(x).replace('.nc','') for x in st.session_state["last_index_df"].get('file',[]).dropna().unique().tolist()]
+    if not candidate_floats:
+        with engine.connect() as conn:
+            res = conn.execute(text("SELECT DISTINCT file FROM argo_index WHERE file IS NOT NULL LIMIT 500"))
+            rows = res.fetchall()
+            candidate_floats = [os.path.basename(r[0]).replace('.nc','') for r in rows if r and r[0]]
+
+    comp_sel = st.multiselect("Select floats for comparison", options=candidate_floats, max_selections=3, key="comp_sel")
+
+    if comp_sel:
+        metadata = []
+        with engine.connect() as conn:
+            for fid in comp_sel:
+                pattern = f"%{fid}.nc"
+                res = conn.execute(
+                    text("SELECT file, date, date_update, latitude, longitude, ocean, profiler_type, institution "
+                         "FROM argo_index WHERE file LIKE :p LIMIT 1"),
+                    {"p": pattern}
+                )
+                row = res.fetchone()
+                if row:
+                    metadata.append({
+                        "float_id": fid,
+                        "file": row[0],
+                        "date": pd.to_datetime(row[1]) if row[1] is not None else None,
+                        "date_update": pd.to_datetime(row[2]) if row[2] is not None else None,
+                        "latitude": row[3],
+                        "longitude": row[4],
+                        "ocean": row[5],
+                        "profiler_type": row[6],
+                        "institution": row[7]
+                    })
+                else:
+                    metadata.append({
+                        "float_id": fid,
+                        "file": None,
+                        "date": None,
+                        "date_update": None,
+                        "latitude": None,
+                        "longitude": None,
+                        "ocean": None,
+                        "profiler_type": None,
+                        "institution": None
+                    })
+
+        meta_df = pd.DataFrame(metadata).set_index("float_id")
+        st.subheader("Index metadata for selected floats")
+        st.table(meta_df.reset_index())
+
+        # raw .nc values
+        st.subheader("Raw values (from .nc) — depth / temp / psal")
+        for fid in comp_sel:
+            file_path = meta_df.loc[fid, "file"] if fid in meta_df.index else None
+            if not file_path:
+                st.info(f"{fid}: no index file found for this float.")
+                continue
+            with st.expander(f"{fid} — {file_path}"):
+                local_path = get_local_netcdf_path_from_indexfile(file_path)
+                if not os.path.exists(local_path):
+                    try:
+                        local_path = download_netcdf_for_index_path(file_path)
+                        st.success(f"Downloaded {file_path} to {local_path}")
+                    except Exception as e:
+                        st.error(f"Failed to download {file_path}: {e}")
+                        continue
+                else:
+                    st.write(f"Using local file: {local_path}")
+                df_nc = read_netcdf_variables_to_df(local_path, prof_index=0)
+                if df_nc is None or df_nc.empty:
+                    st.info("No numeric depth/temp/psal values found or parsing returned empty table.")
+                else:
+                    st.download_button(f"Download {fid} .nc variables as CSV", df_nc.to_csv(index=False).encode("utf-8"), file_name=f"{fid}_vars.csv")
+                    st.dataframe(df_nc.head(200))
+
+        # db profiles & plots
+        with engine.connect() as conn:
+            meas_cnt = conn.execute(text("SELECT COUNT(*) FROM argo_measurements")).scalar()
+            meas_cnt = int(meas_cnt) if meas_cnt is not None else 0
+        if meas_cnt == 0:
+            st.warning("No ingested measurement rows in DB — raw .nc values above (if any).")
+        else:
+            profs = {fid: get_measurements_for_float(fid) for fid in comp_sel}
+            varmap = find_common_vars_for_floats(comp_sel)
+            st.write("Detected variables summary (lowercased names):")
+            st.json(list(varmap.values()) or [])
+
+            import plotly.graph_objects as go
+
+            def normalize_measurements(dfp: pd.DataFrame) -> pd.DataFrame:
+                df = dfp.copy()
+                cols_lower = {c: c.lower() for c in df.columns}
+                depth_candidates = [c for c, cl in cols_lower.items() if cl in ('depth','pres','pressure','p','pressure_db','pressuredb')]
+                value_candidates = [c for c, cl in cols_lower.items() if cl in ('value','measurement','meas','val','obs_value','observed_value','obs','data')]
+                var_candidates = [c for c, cl in cols_lower.items() if cl in ('variable','param','parameter','name','var','parameter_name')]
+
+                depth_col = depth_candidates[0] if depth_candidates else None
+                value_col = value_candidates[0] if value_candidates else None
+                var_col = var_candidates[0] if var_candidates else None
+
+                if depth_col:
+                    df['depth'] = pd.to_numeric(df[depth_col], errors='coerce')
+                else:
+                    other_depth = next((c for c in df.columns if 'level' in c.lower() or 'layer' in c.lower()), None)
+                    df['depth'] = pd.to_numeric(df[other_depth], errors='coerce') if other_depth else pd.NA
+
+                if value_col:
+                    df['value'] = pd.to_numeric(df[value_col], errors='coerce')
+                else:
+                    df['value'] = pd.to_numeric(df.get('value', pd.NA), errors='coerce')
+
+                if var_col:
+                    df['variable'] = df[var_col].astype(str)
+                else:
+                    if 'variable' not in df.columns:
+                        df['variable'] = df.get('variable', pd.NA)
+
+                return df[['variable','value','depth']].copy()
+
+            cols = st.columns(2)
+            def pick_variable_for_type(dfn: pd.DataFrame, regex: str):
+                if 'variable' in dfn.columns and dfn['variable'].notna().any():
+                    matches = dfn.loc[dfn['variable'].astype(str).str.contains(regex, case=False, na=False), 'variable'].unique()
+                    if len(matches):
+                        return str(matches[0])
+                return None
+
+            fig_temp = go.Figure()
+            fig_sal = go.Figure()
+            temp_traces = 0
+            sal_traces = 0
+
+            for fid in comp_sel:
+                dfp = profs.get(fid, pd.DataFrame())
+                if dfp is None or dfp.empty:
+                    st.write(f"Float {fid}: no measurement rows returned by get_measurements_for_float().")
+                    continue
+
+                dfn_temp = None
+                dfn_sal = None
+
+                dfn = normalize_measurements(dfp)
+
+                temp_var = pick_variable_for_type(dfn, r"(temp|theta|t_|sea[_\s-]?temp)")
+                sal_var = pick_variable_for_type(dfn, r"(sal|psal|sea[_\s-]?sal|s_)")
+
+                if temp_var is None:
+                    cand = next((c for c in dfp.columns if re.search(r"temp|theta|t_", c, re.I)), None)
+                    if cand:
+                        dfn_temp = pd.DataFrame({
+                            'variable': [cand]*len(dfp),
+                            'value': pd.to_numeric(dfp[cand], errors='coerce'),
+                            'depth': dfn['depth']
+                        })
+                    else:
+                        dfn_temp = dfn.loc[dfn['variable'].astype(str).str.contains(r"(temp|theta|t_|sea[_\s-]?temp)", case=False, na=False)]
+
+                if sal_var is None:
+                    cand2 = next((c for c in dfp.columns if re.search(r"sal|psal|s_", c, re.I)), None)
+                    if cand2:
+                        dfn_sal = pd.DataFrame({
+                            'variable': [cand2]*len(dfp),
+                            'value': pd.to_numeric(dfp[cand2], errors='coerce'),
+                            'depth': dfn['depth']
+                        })
+                    else:
+                        dfn_sal = dfn.loc[dfn['variable'].astype(str).str.contains(r"(sal|psal|s_)", case=False, na=False)]
+
+                if temp_var:
+                    tmp = dfn[dfn['variable'].astype(str) == temp_var].copy()
+                else:
+                    tmp = (dfn_temp if dfn_temp is not None else dfn.loc[dfn['variable'].astype(str).str.contains(r"(temp|theta|t_|sea[_\s-]?temp)", case=False, na=False)]).copy()
+
+                if not tmp.empty:
+                    tmp['value'] = pd.to_numeric(tmp['value'], errors='coerce')
+                    tmp['depth'] = pd.to_numeric(tmp['depth'], errors='coerce')
+                    tmp = tmp.dropna(subset=['value','depth']).sort_values('depth')
+                    if not tmp.empty:
+                        fig_temp.add_trace(go.Scatter(x=tmp['value'], y=tmp['depth'], mode='lines', name=fid))
+                        temp_traces += 1
+                        st.write(f"Float {fid}: plotting temperature using variable -> {temp_var or 'inferred column/field'}")
+                    else:
+                        st.write(f"Float {fid}: temperature found but lacked numeric depth/value after conversion.")
+                else:
+                    st.write(f"Float {fid}: no temperature-like variable found.")
+
+                if sal_var:
+                    sal = dfn[dfn['variable'].astype(str) == sal_var].copy()
+                else:
+                    sal = (dfn_sal if dfn_sal is not None else dfn.loc[dfn['variable'].astype(str).str.contains(r"(sal|psal|s_)", case=False, na=False)]).copy()
+
+                if not sal.empty:
+                    sal['value'] = pd.to_numeric(sal['value'], errors='coerce')
+                    sal['depth'] = pd.to_numeric(sal['depth'], errors='coerce')
+                    sal = sal.dropna(subset=['value','depth']).sort_values('depth')
+                    if not sal.empty:
+                        fig_sal.add_trace(go.Scatter(x=sal['value'], y=sal['depth'], mode='lines', name=fid))
+                        sal_traces += 1
+                        st.write(f"Float {fid}: plotting salinity using variable -> {sal_var or 'inferred column/field'}")
+                    else:
+                        st.write(f"Float {fid}: salinity found but lacked numeric depth/value after conversion.")
+                else:
+                    st.write(f"Float {fid}: no salinity-like variable found.")
+
+            if temp_traces > 0:
+                fig_temp.update_yaxes(autorange='reversed', title_text='Depth')
+                fig_temp.update_xaxes(title_text='Temperature (units as in your data)')
+                cols[0].plotly_chart(fig_temp, use_container_width=True)
+            else:
+                cols[0].info('No temperature-like traces available for selected floats.')
+
+            if sal_traces > 0:
+                fig_sal.update_yaxes(autorange='reversed', title_text='Depth')
+                fig_sal.update_xaxes(title_text='Salinity (units as in your data)')
+                cols[1].plotly_chart(fig_sal, use_container_width=True)
+            else:
+                cols[1].info('No salinity-like traces available for selected floats.')
+
+# --- Exports ---
+with tabs[5]:
+    st.header("Exports")
+    if st.button("Export measurements to Parquet", key="export_parquet"):
+        path = os.path.join(STORAGE_ROOT, f"argo_measurements_{int(time.time())}.parquet")
+        df = pd.read_sql_query("SELECT * FROM argo_measurements", engine)
+        df.to_parquet(path, index=False)
+        with open(path, "rb") as fh:
+            st.download_button("Download Parquet", fh.read(), file_name=os.path.basename(path), mime="application/octet-stream")
+
+    if st.button("Export measurements to NetCDF (simple)", key="export_netcdf"):
+        path = os.path.join(STORAGE_ROOT, f"argo_measurements_{int(time.time())}.nc")
+        df = pd.read_sql_query("SELECT * FROM argo_measurements", engine)
+        if df.empty:
+            st.warning("No measurements to export.")
+        else:
+            ds = xr.Dataset({
+                "value": (("row",), df["value"].astype(float).fillna(np.nan).values)
+            }, coords={
+                "row": np.arange(len(df)),
+                "float_id": (("row",), df["float_id"].astype(str).values),
+                "obs_time": (("row",), pd.to_datetime(df["obs_time"]).astype("datetime64[ns]").values),
+                "lat": (("row",), df["lat"].astype(float).values),
+                "lon": (("row",), df["lon"].astype(float).values),
+                "depth": (("row",), df["depth"].astype(float).values),
+                "variable": (("row",), df["variable"].astype(str).values),
+            })
+            ds.to_netcdf(path)
+            with open(path, "rb") as fh:
+                st.download_button("Download NetCDF", fh.read(), file_name=os.path.basename(path), mime="application/octet-stream")
+
+st.sidebar.markdown("---")
+st.sidebar.write("Tip: For quick tests, index only a small number of rows (e.g., 100–1000). Large builds can be slow.")
