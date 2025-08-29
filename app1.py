@@ -1,17 +1,10 @@
-# ARGO RAG Explorer — PART 1: Core helpers, ingestion, RAG/MCP utilities
-# Paste PART 1 before PART 2 in a single app.py. This file contains:
-# - imports & environment
-# - SQLite/Postgres optional configuration and schema
-# - NetCDF parsing & ingestion helpers
-# - Vector index builder (Chroma optional) and MCP context assembly
-# - Safe SQL builder and parsing helpers
-
 import os
 import re
 import json
 import time
 import tempfile
 import sqlite3
+
 import multiprocessing
 import datetime
 from typing import Dict, Any, Tuple, List, Optional
@@ -20,6 +13,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 import requests
+
 
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Float, DateTime, text, inspect
 from dotenv import load_dotenv
