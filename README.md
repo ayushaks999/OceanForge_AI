@@ -185,131 +185,30 @@ Tell me which of the above to add and I will embed them into the README in the c
 
 Below is a clear, production-oriented architecture for **ARGO RAG Explorer** including components, data flow, and recommended deployment/layouts. The architecture supports both a simple single-host setup (dev/prototype) and a scalable production deployment using Docker/Kubernetes and managed services.
 
-### 1) Architecture Diagram (Mermaid + ASCII fallback)
-
-Mermaid (copy into GitHub README or mermaid.live to render):
-
-```mermaid
 flowchart LR
-  subgraph User
-    A[Researcher / Analyst] -->|interacts via browser| UI[Streamlit UI]
-  end
-
-  subgraph AppServer
-    UI -->|HTTP| App[app.py (Streamlit)]
-    App --> DB[(SQLite / Postgres)]
-    App --> Storage[(Local FS or S3)]
-    App -->|requests| IFREMER[IFREMER / GDAC]
-    App -->|geocoding| Nom[Nominatim]
-    App -->|LLM calls| LLM[Google Gemini (via LangChain)]
-    App -->|vector queries| Chroma[(Chroma DB or managed vector DB)]
-  end
+  A[Researcher / Analyst] -->|interacts via browser| UI[Streamlit UI]
+  UI -->|HTTP| App[Streamlit App (app.py)]
+  App --> DB[(Relational DB\n(SQLite / Postgres))]
+  App --> Storage[(Object Storage / Local FS)]
+  App --> IFREMER[IFREMER / GDAC]
+  App --> Nom[Nominatim (Geocoding)]
+  App --> LLM[LLM / Embeddings\n(Google Gemini via LangChain)]
+  App --> Chroma[Chroma DB / Vector DB]
+  App --> Status[status.json]
 
   subgraph Workers
-    App -->|enqueue| Queue[Redis / Message Queue]
-    Queue --> Worker[Ingest Worker (Celery / Proc)]
+    Queue[Message Queue\n(Redis / RabbitMQ)]
+    Worker[Ingest Worker\n(Celery / RQ)]
+    Queue --> Worker
+    App -->|enqueue jobs| Queue
     Worker --> Storage
     Worker --> DB
     Worker --> Chroma
   end
 
   subgraph Optional
-    Chroma -->|persist| ObjectStorage[(S3 / Blob)]
+    Chroma -->|persist| ObjStorage[(S3 / Blob Storage)]
   end
-
-  App -->|status updates| StatusFile[status.json]
-  Worker --> StatusFile
 
   style App fill:#f9f,stroke:#333,stroke-width:1px
   style Worker fill:#ff9,stroke:#333,stroke-width:1px
-```
-
-```
-
-ASCII art (readme-friendly fallback):
-
-```
-
-+----------------------+        +--------------------+       +-------------------+
-\|  User (Browser)      | <----> | Streamlit App      | <-->  | Relational DB      |
-\|  (UI)                |        | (app.py)           |       | (SQLite / Postgres)|
-+----------------------+        +---------+----------+       +-------------------+
-\|  ^
-\|  |
-+--------------+  +---------------+
-\|                                 |
-+-------v--------+                +-------v-------+
-\| Local FS / S3  |                | LLM / Embeddings|
-\| (NetCDF store) |                | (Gemini via LC) |
-+----------------+                +----------------+
-^                                   ^
-\|                                   |
-+------v------+                     +------v-------+
-\| Ingest Work- |                     | Vector DB /  |
-\| ers (Celery) |                     | Chroma / DB  |
-+------------- +                     +--------------+
-
-```
-
----
-
-### 2) Components & Responsibilities
-- **Streamlit App (app.py)**
-  - Single entrypoint for UI and synchronous user queries.
-  - Runs `ask_argo_question()`, serves maps, plots, and handles button actions to start workers.
-  - Light orchestration: enqueue background jobs, call `ensure_models()`, and build MCP contexts.
-
-- **Relational DB (SQLite / Postgres)**
-  - `argo_index` table: index metadata.
-  - `argo_info` table: ingested profile rows and measurements.
-  - Use Postgres for concurrency and production workloads.
-
-- **Storage (Local FS / S3)**
-  - Store downloaded `.nc` files in `AGENTIC_RAG_STORAGE`.
-  - Optionally use S3 (or any object store) for multi-host access.
-
-- **Background Workers**
-  - Responsible for heavy tasks: index ingestion, NetCDF downloads, parse + ingest, Chroma builds.
-  - Recommended: Celery (Redis/RabbitMQ) or RQ instead of `multiprocessing` for fault-tolerant processing.
-
-- **Chroma / Vector DB**
-  - Stores embeddings and metadata for fast semantic retrieval.
-  - Optional but recommended for high-quality RAG.
-
-- **LLM / Embeddings (Google Gemini via LangChain)**
-  - External API used via `ensure_models()`.
-  - Receives MCP context + question and returns structured JSON.
-
-- **External Data Sources**
-  - IFREMER / GDAC — index file and NetCDF hosting.
-  - Nominatim — place geocoding.
-
-- **Status & Monitoring**
-  - `status.json` is used for short-term status. For production, integrate Prometheus + Grafana + logs.
-
----
-
-### 3) Data Flow / Sequence (Typical Query)
-1. User asks a question in the Chat tab.
-2. App attempts LLM parsing (`llm_to_structured`) or falls back to `_simple_parse_question()`.
-3. If place name provided, App resolves bounding box via Nominatim.
-4. App runs SQL (via `safe_sql_builder`) to retrieve `argo_index` rows.
-5. If measurement query, App attempts to load local `.nc` previews (download if missing) and parse to DataFrame.
-6. `assemble_mcp_context()` collects index sample + .nc previews + vector hits (if Chroma available).
-7. App calls LLM with MCP context; LLM returns structured JSON (`rag_answer_with_mcp`).
-8. App displays index rows, measurement rows, plots, and LLM answer; user can download CSV/Parquet.
-
----
-
-### 4) Recommended Production Deployment (k8s + managed services)
-- **Containerize** app + worker: two images (`app`, `worker`).
-- **Deploy**:
-  - `Deployment` for `streamlit-app` (1-3 replicas behind an ingress/NGINX).
-  - `Deployment` for `worker` (scalable workers) with a `HorizontalPodAutoscaler`.
-  - `Redis` (or RabbitMQ) for Celery broker & result backend.
-  - `Postgres` with a storage class or managed service.
-  - `S3` (AWS/GCP/MinIO) for NetCDF storage & Chroma persistence.
-  - `Chroma` or managed vector DB (or use Chroma + duckdb+parquet with shared storage).
-  - Secrets manager for `GEMINI_API_KEY` and DB creds.
-  - Monitoring stack (Prometheus + Grafana) and c
-```
