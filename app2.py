@@ -1,12 +1,10 @@
-# PART 1: ARGO RAG Explorer - BACKEND (db, ingestion, parsers, helpers)
-# Paste this above PART 2 in a single app.py, or save as a module and import in PART 2.
-
 import os
 import re
 import json
 
 import time
 import tempfile
+
 import sqlite3
 import multiprocessing
 import datetime
@@ -16,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 import xarray as xr
+
 import requests
 
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Float, DateTime, text, inspect
