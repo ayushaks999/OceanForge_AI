@@ -25,32 +25,104 @@
 
 ## Advanced Architecture Diagram
 
-Below is a polished, production-ready architecture diagram illustrating the full data flow, components, and recommended deployment layout for **ARGO RAG Explorer**. For reliable rendering on GitHub (and to avoid Mermaid parsing issues), the diagram is included as an image. Add the generated files to your repository at `docs/architecture/`.
+This section contains the **production-oriented architecture** that matches the Background, Description, and Expected Solution you provided — now updated to explicitly show production choices (Postgres, Celery/Redis, S3/Object Storage, vector-store alternatives, provenance/chunks, monitoring, and secrets management).
 
-**Files to add to repo** (I generated these for you and can export them):
+### Architecture (image + mermaid)
 
-* `docs/architecture/argo_architecture.svg`
-* `docs/architecture/argo_architecture.png`
+> **Recommended files to add to repo**:
+>
+> * `docs/architecture/argo_architecture_advanced.svg`
+> * `docs/architecture/argo_architecture_advanced.png`
 
-Embed in README with the following markdown once you push the images:
+Embed with Markdown:
 
 ```md
 ### Architecture (advanced)
 
-![ARGO RAG Explorer Architecture](docs/architecture/argo_architecture.svg)
+![ARGO RAG Explorer — Advanced Architecture](docs/architecture/argo_architecture_advanced.svg)
 
-*Figure: Advanced architecture — Streamlit app, background workers, storage, DB, Chroma/LLM, and external sources (IFREMER, Nominatim).* 
+*Figure: Advanced architecture — Streamlit app, background workers (Celery), Postgres, S3/MinIO, Chroma/FAISS/Pinecone, LLM providers and monitoring.*
 ```
 
-### Diagram explanation
+For readers who prefer a rendered diagram or cannot render the image inline, a clean Mermaid representation is provided below for use in mermaid.live or GitHub when supported. (Note: complex diagrams often render more reliably as PNG/SVG images than raw Mermaid on GitHub.)
 
-* **Streamlit App**: UI entrypoint. Hosts chat, index explorer, ingest controls and visualization endpoints. Orchestrates lightweight tasks and enqueues heavy jobs.
-* **Relational DB** (`argo_index`, `argo_info`): primary structured store. Use Postgres in production for concurrency; SQLite is fine for quick testing.
-* **Storage (Object / Local FS)**: persistent NetCDF store. Use S3/minio for multi-host deployments.
-* **Background Workers**: Celery/RQ workers for ingestion, vectorization, and long-running tasks; workers read/write Storage and DB and update Chroma.
-* **Chroma / Vector DB**: stores embeddings and metadata for semantic retrieval; optional but recommended for high-quality RAG.
-* **LLM / Embeddings**: external API (Gemini via LangChain) used for parsing, MCP-grounded RAG and structured JSON answers.
-* **External data**: IFREMER/GDAC for index and NetCDF; Nominatim for geocoding place names.
+```mermaid
+flowchart TB
+  subgraph UserLayer
+    User["User (Researcher / Analyst) 
+Browser UI"]
+  end
+
+  subgraph AppLayer
+    UI["Streamlit UI 
+(chat, visualizations, ingest controls)"]
+    App["App Logic (app.py) 
+MCP orchestration"]
+  end
+
+  subgraph Infra
+    DB["Postgres (prod) 
+SQLite (dev)"]
+    ObjectStore["S3 / MinIO 
+(NetCDF storage)"]
+    MQ["Message Queue 
+(Redis / RabbitMQ)"]
+    WorkerPool["Worker Pool 
+(Celery / RQ workers)"]
+    VectorStore["Vector DB (Chroma | FAISS | Pinecone)"]
+    LLM["LLM Providers 
+(Gemini | GPT | QWEN | LLaMA) via LangChain"]
+    Provenance["Provenance / Chunks 
+(audit table / metadata store)"]
+    Monitoring["Monitoring & Logging 
+(Prometheus, Grafana, Loki)"]
+    Secrets["Secrets Manager 
+(K8s Secrets / Vault)"]
+  end
+
+  User --> UI
+  UI --> App
+  App --> DB
+  App --> ObjectStore
+  App --> LLM
+  App --> VectorStore
+  App --> MQ
+  App --> Provenance
+  MQ --> WorkerPool
+  WorkerPool --> ObjectStore
+  WorkerPool --> DB
+  WorkerPool --> VectorStore
+  VectorStore --> ObjectStore
+  LLM --> Provenance
+  Monitoring --> App
+  Monitoring --> WorkerPool
+  Secrets --> App
+  Secrets --> WorkerPool
+
+  classDef infra fill:#f8f9fa,stroke:#333,stroke-width:1px
+  class App,UI infra
+```
+
+### Diagram explanation & mapping to requirements
+
+* **Postgres (prod) / SQLite (dev)**: Postgres is recommended for production deployments to handle concurrent writes and analytical workloads. The README and diagram explicitly show Postgres as the production default.
+* **Object Storage (S3 / MinIO)**: persistent store for downloaded NetCDF files. Workers and the app read/write to shared object storage to avoid duplicate downloads across instances.
+* **Worker Pool (Celery / RQ)**: replace `multiprocessing` with a robust task queue to handle index ingestion, NetCDF downloads, parsing, and vectorization reliably and at scale.
+* **Message Queue (Redis / RabbitMQ)**: broker for tasks; result backend and rate-limiting for LLM calls.
+* **Vector Store (Chroma | FAISS | Pinecone)**: optional but recommended for semantic retrieval; the diagram shows alternatives and how vectors persist to object storage where applicable.
+* **LLM Providers**: pluggable providers (Gemini shown in code as default when configured) — the architecture allows swapping LLMs with LangChain adapters.
+* **Provenance / Chunks**: a metadata table or store that records MCP chunks and vector hit metadata to ensure auditable LLM responses.
+* **Monitoring & Secrets**: recommended production integrations (Prometheus/Grafana, Loki/ELK, and Vault/K8s secrets).
+
+---
+
+### Operational notes (what changed vs. the original README)
+
+* Documented and recommended **Postgres** as production DB instead of using SQLite by default.
+* Replaced `multiprocessing` background processes with a **queue + workers** pattern (Celery/RQ + Redis/RabbitMQ) in the diagram and notes.
+* Explicitly calls out **vector-store alternatives** and shared persistence (duckdb+parquet or S3) for Chroma.
+* Added **provenance/chunk** storage for auditability of RAG outputs.
+* Added **monitoring, secrets, and rate-limiting** notes to reflect production operational needs.
 
 ---
 
