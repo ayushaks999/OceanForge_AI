@@ -1,48 +1,49 @@
 # ARGO RAG Explorer
 
-> **A professional Retrieval-Augmented-Generation (RAG) platform for ARGO oceanographic profiles** — index, ingest, explore and chat with Argo `.nc` profiles. ⚓️🌊
+> **A professional Retrieval-Augmented-Generation (RAG) platform for ARGO oceanographic profiles** — index, ingest, explore, compare trajectories, and chat with Argo `.nc` profiles. ⚓️🌊
 
 ---
 
 ## 🚀 One-line summary
 
-ARGO RAG Explorer is a streamlined web application to search the IFREMER ARGO index, download NetCDF profiles, parse per-sample measurements into a relational store, and answer natural-language questions using a Retrieval-Augmented-Generation pipeline with Multi-Context Prompting (MCP).
+ARGO RAG Explorer is a polished Streamlit application that ingests the IFREMER ARGO index, downloads and parses NetCDF profiles into a tabular `argo_info` table, supports geospatial queries (nearest floats & bounding-box), plots trajectories, and answers natural-language questions using an MCP-grounded RAG pipeline with optional vector embeddings.
 
 ---
 
 ## ✨ Highlights & Features
 
-* Safe, idempotent ingestion of IFREMER `ar_index_global_prof.txt` into `argo_index`.
-* Robust `.nc` parsing via `xarray` to create per-sample rows (depth / temp / psal + metadata) in `argo_info`.
-* Flexible database backends: SQLite for quick demos and Postgres for production.
-* Optional vector index (Chroma) + embeddings for semantic retrieval of profile metadata and previews.
-* MCP: assemble index samples, `.nc` previews, and vector hits to ground the LLM and reduce hallucination.
-* Streamlit UI with polished tabs: Nearest floats, Index Explorer, Bulk Ingest, RAG Chat, Trajectories & Comparison, Exports.
-* Export ingested data to Parquet / NetCDF for analysis or sharing.
+* Robust ingestion of IFREMER `ar_index_global_prof.txt` into `argo_index` table.
+* Parse `.nc` NetCDF profiles via `xarray` into per-sample rows (depth / temp / psal + rich metadata) in `argo_info`.
+* Nearest-float search using Haversine distance (`nearest_floats()`), and trajectory extraction from `argo_info` for per-float path plotting.
+* Safe SQL builder (`safe_sql_builder()`) for parameterized spatial, temporal, and variable queries.
+* Optional semantic retrieval with Chroma (vector index) + embeddings for better RAG results.
+* MCP (Multi-Context Prompting): assemble index samples, `.nc` CSV previews, and vector hits to ground the LLM.
+* Streamlit UI with tabs for Nearest floats, Index Explorer, Bulk Ingest, RAG Chat, Trajectories & Comparison, and Exports.
+* Export ingested data to Parquet and NetCDF for downstream analytics and scientific workflows.
 
 ---
 
-## 🧭 Technology stack
+## 🧭 Technical stack
 
 * Python 3.9+
-* xarray, numpy, pandas — NetCDF parsing and numerics
-* SQLAlchemy — database schema & lightweight migrations
-* Streamlit + Plotly — interactive UI & visualizations
-* Optional: chromadb (vectors), langchain-google-genai (Gemini LLM / embeddings), folium (maps)
+* xarray, numpy, pandas — NetCDF parsing and numeric manipulations
+* SQLAlchemy — DB schema management & migration helper
+* Streamlit + Plotly — UI and visualizations
+* Optional: chromadb (vector store), langchain-google-genai (Gemini LLM/embeddings), folium (maps)
 
 ---
 
-## 📁 Recommended repository layout
+## 📁 Recommended repo layout
 
 ```
 app/
   ├─ core.py           # ingestion, parsing, DB helpers
   ├─ rag.py            # MCP & RAG helpers (assemble contexts, call LLM)
-  ├─ ui.py             # Streamlit application (tabs & views)
+  ├─ ui.py             # Streamlit app (tabs & views)
   ├─ utils.py          # helpers (HTTP session, geocoding)
   └─ config.py         # env config loader
 
-storage/               # downloaded .nc files, chroma dir, exports
+storage/               # downloaded .nc, chroma dir, exports
 .env                   # environment variables
 requirements.txt
 README.md
@@ -54,108 +55,159 @@ README.md
 
 ```ini
 ARGO_SQLITE_PATH=./storage/argo.db
-ARGO_PG_URL=                     # optional (postgres://user:pass@host:port/db)
+ARGO_PG_URL=                     # optional Postgres URL
 IFREMER_INDEX_URL=https://data-argo.ifremer.fr/ar_index_global_prof.txt
 IFREMER_BASE=https://data-argo.ifremer.fr/dac
 AGENTIC_RAG_STORAGE=./storage
 GEMINI_API_KEY=YOUR_GOOGLE_API_KEY    # optional for LLM/embeddings
 ```
 
-> Tip: Use Postgres in production; SQLite is fine for local testing.
+> Use Postgres for production; SQLite is convenient for development and demos.
 
 ---
 
-## 🧭 High-level architecture
+## 🧭 Full architecture (with trajectory & nearest-float components)
 
-Below is a compact diagram showing the main components and how they interact.
+Here is an updated architecture diagram that explicitly includes the trajectory extraction and nearest-float logic.
 
 ```mermaid
 flowchart TB
-  A[Index_File] --> B[Parse_Index_File]
-  B --> C[Ingest_Index_to_DB]
-  D[Download_NetCDF] --> E[Parse_NetCDF_to_Info_Rows]
-  E --> F[Ingest_Info_to_DB]
-  C & F --> G[DB_Query_Service]
-  H[Chroma_Embeddings] --> I[Vector_Retrieval]
-  G & I --> J[Assemble_MCP_Context]
-  J --> K[LLM_Prompting]
-  K --> L[RAG_Answer]
-  M[Streamlit_UI] --> G
-  M --> D
-  M --> L
+  subgraph Index
+    A[IFREMER Index File] --> B[parse_index_file()]
+    B --> C[ingest_index_to_sqlite() 
+(argo_index)]
+  end
+
+  subgraph Download_Parse
+    D[download_netcdf_for_index_path()] --> E[parse_profile_netcdf_to_info_rows()]
+    E --> F[ingest_info_rows() 
+(argo_info)]
+  end
+
+  subgraph Retrieval
+    C --> G[safe_sql_builder()]
+    F --> G
+    G --> H[DB Query Service]
+    I[Chroma & Embeddings] --> J[Vector Retrieval]
+    H & J --> K[assemble_mcp_context()]
+    K --> L[LLM Prompting & RAG]
+    L --> M[rag_answer_with_mcp()]
+  end
+
+  subgraph UI
+    N[Streamlit UI] --> H
+    N --> D
+    N --> M
+    N --> O[nearest_floats() 
+(Haversine)]
+    N --> P[trajectory SQL 
+(extract per-profile lat/lon from argo_info)]
+  end
 ```
 
-**Component notes:**
+**Key additions:**
 
-* **Index ingestion:** `ensure_index_file()` → `parse_index_file()` → `ingest_index_to_sqlite()`.
-* **Profile ingest:** `download_netcdf_for_index_path()` → `parse_profile_netcdf_to_info_rows()` → `ingest_info_rows()`.
-* **Retrieval:** `safe_sql_builder()` constructs parameterized SQL for `argo_index` and `argo_info` queries.
-* **RAG / MCP:** `assemble_mcp_context()` merges index samples, `.nc` previews, and vector hits for the LLM prompt.
-* **UI:** Streamlit orchestrates user flows: nearest floats, place lookup, ingestion, chat, comparisons, exports.
+* **nearest\_floats():** reads `argo_index` lat/lon and computes haversine distances to return nearest floats; used by the "Nearest ARGO floats" UI tab.
+* **Trajectory SQL:** queries `argo_info` for per-profile `juld`, `latitude`, `longitude` and optional `pres` to build trajectories and time-series — used by the Trajectories & Profile comparison tab.
 
 ---
 
-## 📚 Data model
+## 📚 Data model & example SQL snippets
 
-* **argo\_index** — IFREMER index rows: `file`, `date`, `latitude`, `longitude`, `ocean`, `institution`, `date_update`, ...
-* **argo\_info** — per-measurement rows (ingested from `.nc`): `juld`, `latitude`, `longitude`, `pres`, `temp`, `psal`, `parameter`, plus calibration & history fields.
+### Tables
 
-Schema is created via SQLAlchemy and a small migration helper `_ensure_info_table_schema()` adds missing columns when required.
+* **argo\_index** — columns: `file`, `date`, `latitude`, `longitude`, `ocean`, `profiler_type`, `institution`, `date_update`, etc.
+* **argo\_info** — columns: `file`, `juld` (datetime), `latitude`, `longitude`, `pres`, `temp`, `psal`, `parameter`, calibration/history fields, etc.
 
----
+### Example: Nearest floats (haversine approach)
 
-## 🧪 Usage examples
+```sql
+SELECT file, latitude, longitude, date
+FROM argo_index
+WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+LIMIT 10000; -- then compute distances client-side and pick top-N
+```
 
-* **Nearest floats:** `nearest_floats(lat, lon, limit)` — returns closest index rows using Haversine distance.
-* **Place lookup:** free-text geocode (Nominatim) → bounding box → index query via `safe_sql_builder()`.
-* **Bulk ingest:** paste index file paths → download `.nc` → parse → ingest into `argo_info`.
-* **Chat (RAG):** user asks a question; system prefers `.nc` previews for measurement queries, otherwise queries DB; MCP used to ground LLM.
-* **Compare:** choose up to 3 floats → plot trajectories from `argo_info` and compare temp/psal profiles.
+(Implementation computes distances in Python using `haversine_np()` for speed & numeric stability.)
 
----
+### Example: Trajectories — per-float positions
 
-## 🧠 RAG & MCP guidance
+```sql
+SELECT file, juld, latitude, longitude, pres
+FROM argo_info
+WHERE file LIKE '%<FLOAT_ID>.nc' AND latitude IS NOT NULL AND longitude IS NOT NULL
+ORDER BY juld ASC;
+```
 
-* Prefer `.nc` previews for numeric-variable queries when available; they are the closest representation of the raw instrument measurements.
-* The MCP context should be compact: include a small sample of index rows, brief `.nc` CSV previews (head), and vector hits metadata.
-* Use LLM temperature=0 for deterministic behavior in prompt-to-JSON responses.
+### Example: Measurement query (safe\_sql\_builder output)
 
----
-
-## ⚙️ Deployment & scaling
-
-* For demos: a VM with 4–8 cores and 16–32 GB RAM is sufficient. Use SQLite or a small Postgres instance.
-* For production: containerize with Docker, use managed Postgres, and move `.nc` files to object storage (S3 / GCS). Run Chroma as a separate service.
-* For heavy geospatial loads consider PostGIS and dedicated geospatial queries.
-
----
-
-## ✅ Testing checklist
-
-* Unit tests for `parse_profile_netcdf_to_info_rows()` with representative NetCDF variants.
-* Tests for `_to_float_array()` and `_maybe_get()` to ensure robustness across variable shapes.
-* Integration test: small IFREMER subset (100–1k rows) to validate download → parse → ingest → query → UI.
+```sql
+SELECT * FROM argo_info
+WHERE argo_info.latitude >= :lat_min AND argo_info.latitude <= :lat_max
+  AND lower(argo_info.parameter) LIKE :var
+  AND argo_info.juld >= :t0_dt AND argo_info.juld <= :t1_dt
+ORDER BY juld DESC LIMIT 500;
+```
 
 ---
 
-## 📦 Exports & interoperability
+## 🧪 How the RAG flow prefers sources
 
-* Export `argo_info` to Parquet (fast analytics) and NetCDF (scientific compatibility). Both are included in the UI.
-* Parquet files are portable to DuckDB, Spark, and BI tools.
+1. Parse user question (LLM `llm_to_structured()` or fallback rule parser).
+2. If variable-specific (e.g., "salinity"), try to load `.nc` previews for matched index rows and use them as primary source.
+3. Otherwise, query `argo_info` with `safe_sql_builder()` to fetch measurement rows.
+4. Build MCP context including a small index sample, `.nc` CSV heads, and vector hits (if available).
+5. Send compact, clearly-formatted prompt to the LLM and parse the returned JSON answer.
+
+This ordering reduces hallucination and uses raw instrument data where possible.
 
 ---
 
-## 🤝 Contributing
+## 🧪 Testing checklist (expanded)
 
-* Fork → Branch → PR with tests and updated README. Include one or two `.nc` samples for parser regression tests.
+* Unit tests for `parse_profile_netcdf_to_info_rows()` across NetCDF variants (dimension names & shapes).
+* Tests for `nearest_floats()` correctness (haversine) and edge cases near the dateline / poles.
+* Tests for `safe_sql_builder()` making sure parameterized SQL is safe and filters are applied correctly.
+* Integration test: ingest a small IFREMER subset and validate end-to-end RAG answers and visualizations.
 
 ---
 
-## 🧾 License & contact
+## ⚙️ Run & usage
+
+1. Install requirements and create `.env`.
+2. Optionally index a small sample first for fast experimentation:
+
+```bash
+python -c "from core import ensure_index_file, parse_index_file, ingest_index_to_sqlite; p=ensure_index_file(); df=parse_index_file(p); ingest_index_to_sqlite(df.head(100))"
+```
+
+3. Start UI:
+
+```bash
+streamlit run ui.py
+```
+
+---
+
+## 📦 Exports
+
+* Export `argo_info` to Parquet or NetCDF (provided by UI). Parquet for analytics (DuckDB/Spark), NetCDF for scientific tools.
+
+---
+
+## 🚀 Deployment suggestions
+
+* Small demo: 4–8 CPU cores, 16–32 GB RAM, SQLite or small Postgres instance.
+* Production: Docker + Kubernetes, managed Postgres, S3 for `.nc` files, dedicated Chroma/embeddings service.
+* Use secrets manager for `GEMINI_API_KEY` and DB credentials.
+
+---
+
+## 🧾 License & Contact
 
 * Suggested license: MIT or Apache-2.0 (add LICENSE file).
-* Contact / Author: **Ayush Kumar Shaw** — add GitHub and email in project metadata.
+* Contact: **Ayush Kumar Shaw** — add GitHub and email in project metadata.
 
 ---
 
-✨ *Want this README exported to `README.md` in the repo or a concise SIH submission one-pager (with diagram as an image)?*
+✨ I updated the README to include the **nearest-floats** and **trajectory SQL** details and expanded the architecture and SQL examples. Want a condensed SIH one-sheet or a PPT slide deck export next?
