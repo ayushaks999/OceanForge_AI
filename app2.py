@@ -1646,15 +1646,21 @@ with tabs[3]:
 with tabs[4]:
     st.header("Profile & Index metadata comparison (trajectories from argo_info)")
 
+    import uuid
+    import plotly.express as px
+    import plotly.graph_objects as go
+    import pandas as pd
+    import os
+
     # candidate floats from last index query or fallback to index table
     candidate_floats = []
     if not st.session_state.get("last_index_df", pd.DataFrame()).empty:
-        candidate_floats = [os.path.basename(x).replace('.nc','') for x in st.session_state["last_index_df"].get('file',[]).dropna().unique().tolist()]
+        candidate_floats = [os.path.basename(x).replace('.nc', '') for x in st.session_state["last_index_df"].get('file', []).dropna().unique().tolist()]
     if not candidate_floats:
         with engine.connect() as conn:
             res = conn.execute(text("SELECT DISTINCT file FROM argo_index WHERE file IS NOT NULL LIMIT 500"))
             rows = res.fetchall()
-            candidate_floats = [os.path.basename(r[0]).replace('.nc','') for r in rows if r and r[0]]
+            candidate_floats = [os.path.basename(r[0]).replace('.nc', '') for r in rows if r and r[0]]
 
     comp_sel = st.multiselect("Select floats for comparison", options=candidate_floats, max_selections=3, key="comp_sel")
 
@@ -1713,21 +1719,20 @@ with tabs[4]:
             df_positions['latitude'] = pd.to_numeric(df_positions['latitude'], errors='coerce')
             df_positions['longitude'] = pd.to_numeric(df_positions['longitude'], errors='coerce')
             df_positions['pres'] = pd.to_numeric(df_positions.get('pres', pd.NA), errors='coerce')
-            df_positions = df_positions.dropna(subset=['latitude','longitude']).copy()
+            df_positions = df_positions.dropna(subset=['latitude', 'longitude']).copy()
 
             if df_positions.empty:
                 st.warning("`argo_info` contains no positions for the selected floats (or coordinates are null).")
             else:
                 center_lat = float(df_positions['latitude'].mean())
                 center_lon = float(df_positions['longitude'].mean())
-
                 try:
                     fig_traj = px.line_mapbox(
-                        df_positions.sort_values(['float_id','juld']),
+                        df_positions.sort_values(['float_id', 'juld']),
                         lat='latitude', lon='longitude',
                         color='float_id',
                         hover_name='file' if 'file' in df_positions.columns else None,
-                        hover_data={k: True for k in ['juld','pres'] if k in df_positions.columns},
+                        hover_data={k: True for k in ['juld', 'pres'] if k in df_positions.columns},
                         zoom=3,
                         center={'lat': center_lat, 'lon': center_lon},
                         height=420,
@@ -1737,12 +1742,23 @@ with tabs[4]:
                         lat='latitude', lon='longitude',
                         color='float_id',
                         hover_name='file' if 'file' in df_positions.columns else None,
-                        hover_data={k: True for k in ['juld','pres'] if k in df_positions.columns},
+                        hover_data={k: True for k in ['juld', 'pres'] if k in df_positions.columns},
                         zoom=3,
                     )
                     for t in scatter.data:
                         fig_traj.add_trace(t)
-                    fig_traj.update_layout(mapbox_style='open-street-map', margin={'r':0,'t':0,'l':0,'b':0}, legend=dict(title='Float ID'))
+                    # make map lines thinner and markers a bit smaller
+                    fig_traj.update_traces(line=dict(width=1.5))
+                    fig_traj.update_traces(marker=dict(size=6, opacity=0.9))
+                    # improved aesthetics
+                    fig_traj.update_layout(
+                        template='plotly_dark',
+                        mapbox_style='open-street-map',
+                        margin={'r': 0, 't': 0, 'l': 0, 'b': 0},
+                        legend=dict(title='Float ID', orientation='v', x=1.02, y=0.95),
+                        hovermode='closest',
+                        font=dict(size=12)
+                    )
                     st.subheader("Trajectories (from argo_info positions)")
                     st.plotly_chart(fig_traj, use_container_width=True, key=f"traj_{uuid.uuid4().hex}")
                 except Exception:
@@ -1750,7 +1766,8 @@ with tabs[4]:
                     st.dataframe(df_positions.head(200))
 
                 st.markdown("### Sample positions (from argo_info)")
-                st.dataframe(df_positions[['float_id','file','juld','latitude','longitude','pres']].sort_values(['float_id','juld']).head(500) if 'file' in df_positions.columns else df_positions[['float_id','juld','latitude','longitude','pres']].sort_values(['float_id','juld']).head(500))
+                pos_cols = ['float_id', 'file', 'juld', 'latitude', 'longitude', 'pres'] if 'file' in df_positions.columns else ['float_id', 'juld', 'latitude', 'longitude', 'pres']
+                st.dataframe(df_positions[pos_cols].sort_values(['float_id', 'juld']).head(500))
         else:
             st.info("No per-profile positions found in `argo_info` for selected floats.")
 
@@ -1794,14 +1811,6 @@ with tabs[4]:
             st.write("Detected variables summary (lowercased names):")
             st.json(list(varmap.values()) or [])
 
-            import plotly.graph_objects as go
-            import plotly.express as px
-            import uuid
-
-            # -----------------------
-            # Improved profile plots (robust hover_data handling)
-            # -----------------------
-
             # build cleaned per-float dfs and then a combined df for display
             cleaned_frames = []
             for fid, dfp in profs.items():
@@ -1814,9 +1823,13 @@ with tabs[4]:
                     dfp['pres'] = dfp['depth']
                 if 'psal' not in dfp.columns and 'psa' in dfp.columns:
                     dfp['psal'] = dfp['psa']
+
+                # numeric conversions
                 dfp['pres'] = pd.to_numeric(dfp.get('pres', pd.NA), errors='coerce')
+                # temp conversion: keep numeric but we'll drop any sentinel flag values (temp == 1) for plotting
                 dfp['temp'] = pd.to_numeric(dfp.get('temp', pd.NA), errors='coerce')
                 dfp['psal'] = pd.to_numeric(dfp.get('psal', pd.NA), errors='coerce')
+
                 if 'juld' in dfp.columns:
                     dfp['juld'] = pd.to_datetime(dfp['juld'], errors='coerce')
 
@@ -1828,19 +1841,32 @@ with tabs[4]:
             else:
                 combined_df = pd.DataFrame()
 
-            # ensure backward compatibility: define fig_sal if older code references it
+            # compatibility placeholder
             fig_sal = None
 
             # helper to choose hover columns only if present
             def pick_hover_cols(df, want):
                 return [c for c in want if c in df.columns]
 
-            # --- Temperature vs Depth (modern, clear) ---
-            # prefer explicit 'depth' column for y-axis, fall back to 'pres' if needed
-            depth_col = 'depth' if 'depth' in combined_df.columns else ('pres' if 'pres' in combined_df.columns else None)
+            # ---- Prepare a plotting copy where we IGNORE rows with temp == 1 (user request) ----
+            plot_df = combined_df.copy()
+            # ensure temp numeric and juld datetime (these conversions are idempotent)
+            if 'temp' in plot_df.columns:
+                plot_df['temp'] = pd.to_numeric(plot_df['temp'], errors='coerce')
+                # remove sentinel flag rows where temp equals exactly 1 (many datasets use 1 as QC / flag)
+                plot_df = plot_df[plot_df['temp'] != 1].copy()
+            if 'juld' in plot_df.columns:
+                plot_df['juld'] = pd.to_datetime(plot_df['juld'], errors='coerce')
+            if 'pres' in plot_df.columns:
+                plot_df['pres'] = pd.to_numeric(plot_df['pres'], errors='coerce')
 
-            if depth_col and not combined_df.empty and combined_df[['temp', depth_col]].dropna().shape[0] > 0:
-                tmp_plot_df = combined_df.dropna(subset=['temp', depth_col]).copy().sort_values(['float_id', depth_col])
+            # define a nicer palette for up to 3 floats
+            palette = px.colors.qualitative.Dark24
+
+            # --- Temperature vs Depth (aesthetic tweak) using plot_df (temp==1 removed) ---
+            depth_col = 'depth' if 'depth' in plot_df.columns else ('pres' if 'pres' in plot_df.columns else None)
+            if depth_col and not plot_df.empty and plot_df[['temp', depth_col]].dropna().shape[0] > 0:
+                tmp_plot_df = plot_df.dropna(subset=['temp', depth_col]).copy().sort_values(['float_id', depth_col])
                 hover_cols = pick_hover_cols(tmp_plot_df, ['file', 'juld', 'parameter', 'float_id'])
                 fig_temp = px.line(
                     tmp_plot_df,
@@ -1850,18 +1876,21 @@ with tabs[4]:
                     markers=True,
                     hover_data=hover_cols,
                     title=f'Temperature vs {depth_col.capitalize()} (profile)',
-                    labels={'temp': 'Temperature (units in data)', depth_col: f'{depth_col.capitalize()} (instrument units)'}
+                    labels={'temp': 'Temperature (units in data)', depth_col: f'{depth_col.capitalize()} (instrument units)'},
+                    color_discrete_sequence=palette,
+                    line_shape='spline'
                 )
-                fig_temp.update_traces(mode='lines+markers', marker=dict(size=6))
-                fig_temp.update_layout(template='plotly_white', legend_title_text='Float ID', height=520, margin=dict(t=50))
-                fig_temp.update_yaxes(autorange='reversed')
+                # thinner lines + smaller markers
+                fig_temp.update_traces(mode='lines+markers', marker=dict(size=4, opacity=0.85), line=dict(width=1.5))
+                fig_temp.update_layout(template='plotly_dark', legend_title_text='Float ID', height=520, margin=dict(t=70),
+                                       legend=dict(x=1.02, y=0.95), hovermode='closest', font=dict(size=12))
+                fig_temp.update_yaxes(autorange='reversed', showgrid=True, gridwidth=0.5, gridcolor='rgba(255,255,255,0.06)')
             else:
                 fig_temp = None
 
-            # --- Pressure vs Depth (modern) ---
-            # plot pres (x) against depth (y) when both columns exist and are meaningful
-            if 'pres' in combined_df.columns and depth_col and not combined_df[['pres', depth_col]].dropna().empty:
-                pres_plot_df = combined_df.dropna(subset=['pres', depth_col]).copy().sort_values(['float_id', depth_col])
+            # --- Pressure vs Depth (aesthetic tweak) using plot_df ---
+            if 'pres' in plot_df.columns and depth_col and not plot_df[['pres', depth_col]].dropna().empty:
+                pres_plot_df = plot_df.dropna(subset=['pres', depth_col]).copy().sort_values(['float_id', depth_col])
                 hover_cols = pick_hover_cols(pres_plot_df, ['file', 'juld', 'parameter', 'float_id'])
                 fig_pres_depth = px.line(
                     pres_plot_df,
@@ -1871,106 +1900,168 @@ with tabs[4]:
                     markers=True,
                     hover_data=hover_cols,
                     title=f'Pressure vs {depth_col.capitalize()} (profile)',
-                    labels={'pres': 'Pressure (instrument units)', depth_col: f'{depth_col.capitalize()} (instrument units)'}
+                    labels={'pres': 'Pressure (instrument units)', depth_col: f'{depth_col.capitalize()} (instrument units)'},
+                    color_discrete_sequence=palette,
+                    line_shape='spline'
                 )
-                fig_pres_depth.update_traces(mode='lines+markers', marker=dict(size=6))
-                fig_pres_depth.update_layout(template='plotly_white', legend_title_text='Float ID', height=520, margin=dict(t=50))
-                fig_pres_depth.update_yaxes(autorange='reversed')
+                # thinner lines + smaller markers
+                fig_pres_depth.update_traces(mode='lines+markers', marker=dict(size=4, opacity=0.85), line=dict(width=1.5))
+                fig_pres_depth.update_layout(template='plotly_dark', legend_title_text='Float ID', height=520, margin=dict(t=70),
+                                             legend=dict(x=1.02, y=0.95), hovermode='closest', font=dict(size=12))
+                fig_pres_depth.update_yaxes(autorange='reversed', showgrid=True, gridwidth=0.5, gridcolor='rgba(255,255,255,0.06)')
             else:
                 fig_pres_depth = None
 
-            # --- Pressure time-series (juld vs pres) - keep existing style but improved look ---
-            fig_pres_time = go.Figure()
-            pres_time_traces = 0
-            if not combined_df.empty and combined_df[['juld', 'pres']].dropna().shape[0] > 0:
-                for fid in combined_df['float_id'].unique():
-                    ppp = combined_df.loc[combined_df['float_id'] == fid].dropna(subset=['juld', 'pres']).sort_values('juld')
-                    if not ppp.empty:
-                        fig_pres_time.add_trace(go.Scatter(x=ppp['juld'], y=ppp['pres'], mode='lines+markers', name=fid))
-                        pres_time_traces += 1
-                fig_pres_time.update_layout(template='plotly_white', legend_title_text='Float ID', height=520, margin=dict(t=50))
-                fig_pres_time.update_yaxes(title_text='Pressure (instrument units)')
-                fig_pres_time.update_xaxes(title_text='Time (juld)')
-            else:
-                fig_pres_time = None
-
-            # --- Display: give Temp vs Depth and Pres vs Depth prominence (two wide cols), and time-series as third ---
-            # ---------- Display block (robust, compatibility-safe) ----------
-            # Provide compatibility shim so older references to fig_pres / pres_traces won't raise NameError.
-            if 'fig_pres_time' in locals():
-                fig_pres = fig_pres_time
-                pres_traces = pres_time_traces
-            else:
-                fig_pres = locals().get('fig_pres', None)
-                pres_traces = locals().get('pres_traces', 0)
-
-            # Choose layout: Temp (left), Pres-vs-Depth (optional middle), Pres-vs-Time (right)
-            cols = st.columns([1.1, 1.1, 1])
+            # -----------------------
+            # Display: Temp (left), Pres-vs-Depth (right)
+            # -----------------------
+            cols = st.columns([1.1, 1.1])
 
             # Left: Temperature vs Depth
-            if 'fig_temp' in locals() and fig_temp is not None:
+            if fig_temp is not None:
                 cols[0].plotly_chart(
                     fig_temp,
                     use_container_width=True,
                     key=f"fig_temp_{'_'.join(comp_sel) if comp_sel else 'none'}"
                 )
             else:
-                cols[0].info('No temperature-depth profiles available for selected floats.')
+                cols[0].info('No temperature-depth profiles available for selected floats (after ignoring temp==1).')
 
-            # Middle: Pressure vs Depth (optional)
-            if 'fig_pres_depth' in locals() and fig_pres_depth is not None:
+            # Right: Pressure vs Depth
+            if fig_pres_depth is not None:
                 cols[1].plotly_chart(
                     fig_pres_depth,
                     use_container_width=True,
                     key=f"fig_pres_depth_{'_'.join(comp_sel) if comp_sel else 'none'}"
                 )
             else:
-                cols[1].info('No pressure-depth profiles available for selected floats.')
+                cols[1].info('No pressure-depth profiles available for selected floats (after ignoring temp==1).')
 
-            # Right: Pressure vs Time
-            if fig_pres is not None and pres_traces > 0:
-                cols[2].plotly_chart(
-                    fig_pres,
-                    use_container_width=True,
-                    key=f"fig_pres_time_{'_'.join(comp_sel) if comp_sel else 'none'}"
-                )
+            # --- Temperature vs Time (juld) — aggregate per-profile to avoid vertical stacks ---
+            # require columns
+            required = ['float_id', 'juld', 'temp']
+            if not all(rc in plot_df.columns for rc in required):
+                st.info("Temperature vs date plot unavailable — `float_id`, `juld`, and `temp` columns are required.")
             else:
-                cols[2].info('No pressure time-series available for selected floats.')
+                # take only relevant columns (pres/file/psal optional)
+                base_cols = ['float_id', 'juld', 'temp']
+                optional = [c for c in ['file', 'pres', 'psal', 'temp_qc'] if c in plot_df.columns]
+                df_time = plot_df[base_cols + optional].copy()
 
-            # --- Show combined argo_info rows for selected floats ---
+                # If temp_qc exists we still prefer to keep only good QC rows (QC=1), but already filtered temp==1 above.
+                if 'temp_qc' in df_time.columns:
+                    accepted_qc = ['1']  # adjust if your QC scheme differs
+                    df_time['temp_qc'] = df_time['temp_qc'].astype(str).str.strip()
+                    df_time = df_time[df_time['temp_qc'].isin(accepted_qc)].copy()
+
+                # ensure proper dtypes (again)
+                df_time['juld'] = pd.to_datetime(df_time['juld'], errors='coerce')
+                df_time['temp'] = pd.to_numeric(df_time['temp'], errors='coerce')
+                if 'pres' in df_time.columns:
+                    df_time['pres'] = pd.to_numeric(df_time['pres'], errors='coerce')
+
+                df_time = df_time.dropna(subset=['juld', 'temp']).sort_values(['float_id', 'juld'])
+
+                if df_time.empty:
+                    st.info("No valid temperature/time rows to plot after filtering temp==1 / QC.")
+                else:
+                    # aggregation choice
+                    method = st.selectbox("Representative temp per profile (aggregation)", options=[
+                        "Shallowest (temp at minimum pres) — preferred if pres available",
+                        "Median (per profile)",
+                        "Mean (per profile)",
+                        "Max (per profile)"
+                    ], index=1, key=f"temp_agg_method_{'_'.join(comp_sel)}")
+
+                    # compute aggregated dataframe: one row per float_id + juld
+                    if method.startswith("Shallowest") and 'pres' in df_time.columns:
+                        df_time_shallow = df_time.dropna(subset=['pres']).sort_values(['float_id', 'juld', 'pres'])
+                        df_rep = df_time_shallow.groupby(['float_id', 'juld'], as_index=False).first()
+                        # fallback median for groups without pres
+                        all_groups = set(df_time.groupby(['float_id', 'juld']).size().index)
+                        rep_groups = set(df_rep.set_index(['float_id', 'juld']).index)
+                        missing_groups = all_groups - rep_groups
+                        if missing_groups:
+                            med = df_time.groupby(['float_id', 'juld'], as_index=False)['temp'].median()
+                            med = med[med.set_index(['float_id','juld']).index.isin(missing_groups)]
+                            if not med.empty:
+                                for c in df_rep.columns:
+                                    if c not in med.columns:
+                                        med[c] = pd.NA
+                                df_rep = pd.concat([df_rep, med[df_rep.columns]], ignore_index=True, sort=False)
+                    else:
+                        agg_func = 'median' if method.startswith("Median") else ('mean' if method.startswith("Mean") else 'max')
+                        agg_dict = {'temp': agg_func}
+                        for c in optional:
+                            agg_dict[c] = 'first'
+                        df_rep = df_time.groupby(['float_id', 'juld'], as_index=False).agg(agg_dict)
+
+                    df_rep['juld'] = pd.to_datetime(df_rep['juld'], errors='coerce')
+                    df_rep = df_rep.dropna(subset=['juld', 'temp']).sort_values(['float_id', 'juld'])
+
+                    if df_rep.empty:
+                        st.warning("No aggregated temperature/time points available after grouping.")
+                    else:
+                        # date-range filter
+                        min_date = df_rep['juld'].min().date()
+                        max_date = df_rep['juld'].max().date()
+                        start_date, end_date = st.date_input(
+                            "Filter date range (optional)",
+                            value=(min_date, max_date),
+                            min_value=min_date,
+                            max_value=max_date,
+                            key=f"temp_time_date_filter_{'_'.join(comp_sel)}"
+                        )
+                        start_dt = pd.to_datetime(start_date)
+                        end_dt = pd.to_datetime(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+                        df_plot = df_rep[(df_rep['juld'] >= start_dt) & (df_rep['juld'] <= end_dt)].copy()
+
+                        if df_plot.empty:
+                            st.warning("No aggregated temperature data in selected date range.")
+                        else:
+                            hover_cols = [c for c in ['file', 'pres', 'psal', 'float_id'] if c in df_plot.columns]
+                            fig_temp_time = px.line(
+                                df_plot,
+                                x='juld',
+                                y='temp',
+                                color='float_id',
+                                markers=True,
+                                hover_data=hover_cols,
+                                title='Temperature vs Time (per-profile representative)',
+                                labels={'juld': 'Time (juld)', 'temp': 'Temperature (units in data)'},
+                                color_discrete_sequence=palette,
+                                line_shape='spline'
+                            )
+                            # thinner lines + slightly smaller markers
+                            fig_temp_time.update_traces(mode='lines+markers', marker=dict(size=5, opacity=0.9), line=dict(width=1.5))
+                            fig_temp_time.update_layout(
+                                template='plotly_dark',
+                                height=560,
+                                legend_title_text='Float ID',
+                                margin=dict(t=90),
+                                legend=dict(x=1.02, y=0.95),
+                                hovermode='x unified',
+                                font=dict(size=13)
+                            )
+                            # keep rangeslider visible but REMOVE the range selector buttons
+                            fig_temp_time.update_xaxes(rangeslider_visible=True)
+                            fig_temp_time.update_layout(hoverlabel=dict(bgcolor="rgba(0,0,0,0.7)", font_size=12, font_color="white"))
+
+                            cols_tt = st.columns([1, 0.18])
+                            cols_tt[0].plotly_chart(fig_temp_time, use_container_width=True, key=f"temp_time_{uuid.uuid4().hex}")
+
+                            # download aggregated timeseries CSV
+                            csv_bytes = df_plot.to_csv(index=False).encode('utf-8')
+                            cols_tt[1].download_button("Download CSV", csv_bytes, file_name=f"temp_time_{'_'.join(comp_sel)}.csv")
+
+            # --- Show combined argo_info rows for selected floats (single display) ---
             st.subheader("Combined argo_info rows for selected floats")
             if combined_df.empty:
                 st.info("No measurement rows available to display from argo_info.")
             else:
-                # choose columns to present (you can add/remove columns as needed)
                 display_cols = [c for c in combined_df.columns]
                 st.write(f"Showing {len(combined_df)} rows from `argo_info` for selected floats.")
                 st.dataframe(combined_df[display_cols].sort_values(['float_id', 'juld'] if 'juld' in combined_df.columns else ['float_id']).reset_index(drop=True))
-            cols = st.columns(3)
-            if fig_temp:
-                cols[0].plotly_chart(fig_temp, use_container_width=True)
-            else:
-                cols[0].info('No temperature-depth profiles available for selected floats.')
-
-            if fig_sal:
-                cols[1].plotly_chart(fig_sal, use_container_width=True)
-            else:
-                cols[1].info('No salinity-depth profiles available for selected floats.')
-
-            if fig_pres and pres_traces > 0:
-                cols[2].plotly_chart(fig_pres, use_container_width=True)
-            else:
-                cols[2].info('No pressure time-series available for selected floats.')
-
-            # --- Show combined argo_info rows for selected floats (full, scrollable) ---
-            st.subheader("Combined argo_info rows for selected floats")
-            if combined_df.empty:
-                st.info("No measurement rows available to display from argo_info.")
-            else:
-                # choose columns to present (you can add/remove columns as needed)
-                display_cols = [c for c in combined_df.columns]
-                st.write(f"Showing {len(combined_df)} rows from `argo_info` for selected floats.")
-                st.dataframe(combined_df[display_cols].sort_values(['float_id','juld'] if 'juld' in combined_df.columns else ['float_id']).reset_index(drop=True))
 
 # --- Exports ---
 with tabs[5]:
@@ -2005,3 +2096,5 @@ with tabs[5]:
 
 st.sidebar.markdown("---")
 st.sidebar.write("Tip: For quick tests, index only a small number of rows (e.g., 100–1000). Large builds can be slow.")
+
+
