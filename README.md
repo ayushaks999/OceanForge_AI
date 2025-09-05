@@ -238,8 +238,4 @@ df.to_parquet("argo_info.parquet", index=False)
 
 ---
 
-If you want, I can:
 
-* ✂️ Produce a shorter `README.md` summary for project landing pages.
-* 📘 Generate `CONTRIBUTING.md`, `DEPLOYMENT.md` or `ARCHITECTURE.md` based on this document.
-* 🧪 Create example unit tests and CI pipeline snippets.
