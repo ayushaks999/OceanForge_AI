@@ -227,40 +227,36 @@ Below are corrected Mermaid diagrams that visualize the architecture and ML pipe
 ```mermaid
 flowchart TD
   subgraph REMOTE
-    IFREMER_INDEX["IFREMER index file
-(ar_index_global_prof.txt)"]
+    IFREMER_INDEX["IFREMER index file\nar_index_global_prof.txt"]
     DAC["IFREMER DAC (.nc files)"]
   end
 
   subgraph LOCAL
     INDEX_LOCAL["Local index file"]
-    ARGO_INDEX[("DB: argo_index")]
-    ARGO_INFO[("DB: argo_info")]
-    STORAGE["Storage: .nc files & chroma dir"]
+    ARGO_INDEX["DB: argo_index"]
+    ARGO_INFO["DB: argo_info"]
+    STORAGE["Storage: .nc files and chroma directory"]
     STREAMLIT["Streamlit UI (app.py)"]
     WORKERS["Background workers (ingest, chroma build)"]
-    ML_COMP["ML training / inference"]
+    ML_COMP["ML training and inference"]
     CHROMA["ChromaDB (optional)"]
-    LLM["LLM (optional, Gemini)"]
+    LLM["LLM (optional)"]
   end
 
-  IFREMER_INDEX -->|download| INDEX_LOCAL
-  INDEX_LOCAL -->|parse_index_file()| ARGO_INDEX
+  IFREMER_INDEX -->|download index| INDEX_LOCAL
+  INDEX_LOCAL -->|parse index| ARGO_INDEX
+  IFREMER_INDEX -->|download nc files| STORAGE
+  STORAGE -->|local nc files| ARGO_INFO
   ARGO_INDEX --> STREAMLIT
   STREAMLIT -->|user triggers download| STORAGE
-  STORAGE -->|local .nc| ARGO_INFO
-
-  STREAMLIT -->|ask_argo_question()| ARGO_INDEX
-  STREAMLIT -->|read previews / measurements| ARGO_INFO
-
+  STREAMLIT -->|query index| ARGO_INDEX
+  STREAMLIT -->|read measurements| ARGO_INFO
   STREAMLIT --> WORKERS
   WORKERS --> ARGO_INDEX
   WORKERS --> STORAGE
-
   STREAMLIT --> ML_COMP
   ML_COMP --> ARGO_INFO
-
-  STREAMLIT -->|assemble_mcp_context()| CHROMA
+  STREAMLIT -->|assemble context| CHROMA
   CHROMA --> STREAMLIT
   STREAMLIT --> LLM
   LLM --> STREAMLIT
@@ -281,23 +277,52 @@ LOCAL:
 
 ---
 
-### 2) ML training & inference pipeline — corrected
+### 2) RAG request lifecycle (sequence)
+
+```mermaid
+sequenceDiagram
+  participant User
+  participant UI
+  participant Parser
+  participant DB
+  participant NC
+  participant Chroma
+  participant LLM
+
+  User->>UI: Ask question (natural language)
+  UI->>Parser: Parse to structured filters
+  Parser->>DB: Run SQL (safe_sql_builder)
+  DB-->>UI: Return index_rows / measurement_rows
+  UI->>NC: Read .nc previews (optional)
+  UI->>Chroma: Embed query and query collection (optional)
+  Chroma-->>UI: Return vector hits
+  UI->>LLM: assemble_mcp_context() + prompt
+  LLM-->>UI: Return JSON {answer, sql, references}
+  UI-->>User: Render answer, tables, downloads
+```
+
+**ASCII fallback (RAG)**
+
+```
+User -> UI -> Parser -> DB
+    \-> (nc previews, chroma retrieval) -> assemble context -> LLM -> structured answer -> UI
+```
+
+---
+
+### 3) ML training & inference pipeline — corrected
 
 ```mermaid
 flowchart LR
-  ARGO_INFO[("argo_info DB")]
-  DataPrep["Feature engineering
-(lat, lon, pres, psal, juld_ts)"]
+  ARGO_INFO["argo_info DB"]
+  DataPrep["Feature engineering\nlat, lon, pres, psal, juld_ts"]
   Split["Train / Test split"]
-  Candidates["Model candidates
-(RandomForest, GB, HistGB, XGB, LGB)"]
-  Pipelines["Pipelines (Scaler + Estimator)"]
-  Evaluate["Evaluate (RMSE, R2)"]
-  Select["Select best model (metric)
-& persist metadata"]
-  Persist["Persist: joblib (pipeline + features + metrics)"]
-  Inference["Load and predict (single / batch)
-Uncertainty: ensemble std if available"]
+  Candidates["Model candidates\nRF, GB, HistGB, XGB, LGB"]
+  Pipelines["Pipelines: Scaler + Estimator"]
+  Evaluate["Evaluate: RMSE, R2"]
+  Select["Select best model"]
+  Persist["Persist: joblib (pipeline + metadata)"]
+  Inference["Inference: Load and predict\nEnsemble uncertainty if available"]
 
   ARGO_INFO --> DataPrep --> Split --> Candidates --> Pipelines --> Evaluate --> Select --> Persist --> Inference
 ```
@@ -317,3 +342,43 @@ argo_info -> feature engineering -> train/test split -> train multiple models ->
 * The diagrams are intentionally high-level; you can expand any block (e.g., `parse_profile_netcdf_to_info_rows`) into a more detailed sub-diagram if you want.
 
 ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
