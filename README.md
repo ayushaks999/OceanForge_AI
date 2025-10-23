@@ -1,282 +1,334 @@
-# 🌊 ARGO RAG Explorer
+# 🌊 ARGO RAG Explorer — Full-feature, Tech-complete README
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/) [![Streamlit](https://img.shields.io/badge/Streamlit-app-orange.svg)](https://streamlit.io)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/) [![Streamlit](https://img.shields.io/badge/Streamlit-app-orange.svg)](https://streamlit.io) [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/)
 
-**Tagline:** *An enterprise-grade Streamlit application for ingestion, exploration, RAG-powered question answering, visualization, and ML modelling on ARGO oceanographic profile data.*
-
----
-
-## 🔎 Project summary
-
-ARGO RAG Explorer is a production-ready research and engineering toolkit built around ARGO float profile data (NetCDF). It ingests official IFREMER/ARGO index listings and `.nc` profile files, stores flattened per-profile measurements into a relational store, provides a human-friendly Streamlit UI for geospatial searches and interactive plotting, offers RAG-enabled natural-language queries (with optional LLMs & vector DB), and supports model training, export, and inference for oceanographic variables (e.g., temperature predictions).
-
-This README documents architecture, installation, operational concerns, and advanced features — everything needed to run, extend, or deploy the project in research or engineering settings.
+**Tagline:** *An enterprise-grade Streamlit application for ingestion, RAG-enabled exploration, advanced plotting, and multi-model ML workflows over ARGO oceanographic profiles.*
 
 ---
 
-## 📂 What this repo contains
+## 🔎 Executive summary
 
-* `app.py` — Single-file Streamlit application (UI + orchestration). Can be split into modules for maintainability.
-* Core helper functions (embedded in `app.py`):
+ARGO RAG Explorer is a production-focused research application that converts ARGO NetCDF profiles into a queryable relational store, provides advanced interactive visualization, supports Retrieval-Augmented Generation (RAG) and vector search workflows, and exposes a multi-model ML pipeline for predicting oceanographic variables (temperature, salinity, etc.).
 
-  * netCDF parsing (xarray), robust variable detection, and per-sample row generation.
-  * Index ingestion and remote download helpers (IFREMER index support).
-  * SQLAlchemy schema/DB helpers for `argo_index` and `argo_info` tables and runtime migrations.
-  * RAG helpers: context assembly, LLM prompts, Chroma vector retrieval integration.
-  * Background workers for asynchronous index and chroma builds.
-* ML training utilities (sklearn pipelines, safe wrappers for XGBoost/LightGBM, model persistence via joblib).
-* Export utilities: Parquet and NetCDF generation from ingested rows.
-
-> Note: The code was intentionally written to be robust across environments: many optional libraries (Chroma, Gemini LangChain adapter, Folium, XGBoost, LightGBM) are optional and gracefully degrade if not present.
+This README documents the entire technology surface — every major library and capability — so users, reviewers, and hiring managers can immediately see the engineering depth and scientific rigor of the project.
 
 ---
 
-## ⭐ Key Features (detailed)
+## 🧩 Full technology stack (all techs used and optional integrations)
 
-### 1. Data ingestion
+### Core language & runtime
 
-* **Index ingestion**: Download IFREMER index file, parse and persist to `argo_index` table.
-* **NetCDF parsing**: Convert profile `.nc` into many `argo_info` rows (one per measurement) with rich metadata mapping (global attributes, calibration history, QC flags).
-* **Schema**: `argo_index` (index metadata) + `argo_info` (per-profile measurements and metadata) — designed to work on SQLite and Postgres.
-* **Idempotent ingestion**: Partial/migration helpers to add missing columns to `argo_info` when the schema evolves.
+* **Python 3.8+** (development & runtime)
 
-### 2. Interactive exploration & visualization
+### Data processing & scientific
 
-* **Nearest floats**: Haversine-based nearest float search.
-* **Place geocoding**: Integrated Nominatim geocoder with a small catalog for common seas/regions.
-* **Grid-based clustering**: Fast cluster-on-the-fly for map visualizations to keep interactive performance.
-* **Plotly + Mapbox**: Rich interactive maps for points and trajectories.
-* **NC previews**: On-demand `.nc` preview parsing for accurate variable views when DB rows are not yet present.
+* **xarray** — read and manipulate NetCDF (`.nc`) datasets.
+* **netCDF4** (backend dependency for xarray) — low-level NetCDF I/O.
+* **pandas** — tabular ingestion, transforms, CSV/Parquet exports.
+* **numpy** — numeric arrays and vectorized math.
+* **xarray + pandas + numpy** used to robustly parse multi-dimensional ARGO data into per-measurement rows.
 
-### 3. Conversational RAG (Retrieval-Augmented Generation)
+### Database & persistence
 
-* **LLM integration**: Optional Gemini (via `langchain_google_genai`) — structured parser fallback if LLM unavailable.
-* **Context assembly (MCP)**: Combine index samples, `.nc` previews, and vector hits into a concise context for LLM prompts.
-* **Chroma vector store**: Optional vector retrieval to find semantically similar profiles.
-* **Structured JSON responses**: LLM responses are parsed to JSON to extract recommended SQL or final answers.
+* **SQLAlchemy** — composable DB layer and schema definitions.
+* **SQLite** — default local DB (lightweight & zero-config). Ideal for demos.
+* **PostgreSQL (optional)** — production-scale DB via `ARGO_PG_URL`.
+* **joblib** — model artifact persistence.
+* **parquet / xarray.to_netcdf** — export formats for reproducibility.
 
-### 4. ML / Modeling
+### Web UI & Visualization
 
-* **Training UI**: Train multiple tree-based regressors with configurable hyperparameters.
-* **Safe wrappers**: Encapsulates XGBoost / LightGBM compatibility issues with sklearn by lazy instantiation and tag-safe wrappers.
-* **Model persistence**: Save best and all models; load for inference in-session.
-* **Inference UI**: Predict temperature for single samples and evaluate saved models on DB samples.
+* **Streamlit** — main interactive UI and orchestration.
+* **plotly (plotly.express, plotly.graph_objects)** — interactive, publication-quality plotting.
 
-### 5. Exports & reproducibility
+  * Map visualizations: `scatter_mapbox`, `Scattermapbox` for trajectories and clustered points. Uses OpenStreetMap style; compatible with Mapbox tokens if you have one.
+  * Profile plots: Temperature vs Depth, Pressure vs Depth, Temperature vs Time (spline/line), Predicted vs Actual scatter plots.
+* **folium** + **streamlit-folium** (optional) — alternative leaflet maps for geospatial UIs.
 
-* **Parquet and NetCDF exports** from `argo_info` for portability.
-* **Model artifacts** saved via `joblib`.
+### Networking & APIs
+
+* **requests** — robust HTTP, with retry logic via `urllib3` `Retry` and `HTTPAdapter`.
+* **Nominatim (OpenStreetMap)** — geocoding for place → bounding box (with caching and catalog fallback).
+
+### RAG, LLMs & Vector Search (Retrieval stack)
+
+* **langchain-google-genai** adapter (optional) — Google Gemini integration for generation and structured parsing.
+* **Google Generative Embeddings** (optional) — embedding model used when Gemini key provided.
+* **ChromaDB** (optional) — vector store for semantic retrieval of profile text chunks.
+* **MCP (Multi-Context Provider)** pattern — context assembly mixing index samples, `.nc` previews, and vector hits.
+* **Structured JSON responses**: prompts are constrained to return JSON (answer, sql, references) so outputs can be safely parsed and used programmatically.
+* Fallback: robust **rule-based parser** when LLM/embeddings not available.
+
+### Machine Learning & Modeling
+
+* **scikit-learn** — pipelines, preprocessing (`StandardScaler`), model wrappers, metrics (RMSE, R²), `Pipeline` orchestration.
+* **RandomForestRegressor** — bagged ensemble baseline.
+* **GradientBoostingRegressor** — sklearn GBM option.
+* **HistGradientBoostingRegressor** — fast histogram-based GBDT.
+* **XGBoost** (optional) — XGBoost regressor; code includes a **safe wrapper** (`XGBRegressorSafe`) and fallback lazy instantiation to handle sklearn tag incompatibilities and version mismatch.
+* **LightGBM** (optional) — LGBMRegressor support when installed.
+* **Model selection & evaluation:** compare multiple models by **RMSE** or **R²**, pick the best, save artifacts with metadata.
+* **Ensemble diagnostics:** when underlying estimators exist (e.g., `estimators_` in RandomForest), compute per-tree predictions and report predictive standard deviation for uncertainty estimation.
+
+### Dev / Ops / Misc
+
+* **multiprocessing** — background workers for index ingestion and heavy builds (Chroma), keeping the UI responsive.
+* **python-dotenv** — `.env` configuration handling.
+* **pytest / tox** (recommended) — unit testing and CI integration.
+* **black / isort / flake8** — code formatting & linting recommendations.
+* **Docker** — reproducible images for deployment.
+* **Kubernetes / Helm** (optional) — for large-scale production deployments.
 
 ---
 
-## 🏗️ Architecture & Dataflow
+## 🔬 Advanced RAG & Prompting design (what makes this RAG implementation production-ready)
+
+1. **MCP-based context assembly**
+
+   * Combines three sources of evidence: index row summaries, `.nc` previews (exact numeric samples), and vector-retrieved chunks from Chroma.
+   * Limits and trims context to the most relevant chunks to avoid token bloat.
+
+2. **Embedding-aware retrieval**
+
+   * If embeddings/Chroma available, queries are embedded and nearest chunks are retrieved to bring semantically similar profiles into context.
+
+3. **Structured LLM outputs**
+
+   * Prompts enforce a **JSON-only response** (`{answer, sql, references}`) to make downstream parsing reliable. This allows the app to optionally run recommended SQL or display LLM references side-by-side.
+
+4. **Safety & fallbacks**
+
+   * If LLM fails to produce valid JSON, the app gracefully falls back to the rule-based parser. Errors are surfaced in UI with debugging chunks attached.
+
+5. **Explainability**
+
+   * The RAG output includes `_mcp_chunks` (the retrieval traces) so researchers can audit which profiles or chunks influenced the generated answer.
+
+6. **Prompt hygiene**
+
+   * System messages instruct the LLM to behave as an *expert oceanographic assistant* and to avoid unfounded speculation. Numeric data are always quoted separately in the context to reduce hallucination risk.
+
+---
+
+## 📈 Plotting & Visualization Capabilities (detailed)
+
+* **Map visualizations**
+
+  * Scatter / clustered map points with custom lightweight grid clustering — good for thousands of points without heavy geometry work.
+  * Trajectory plotting with line + markers, interactive hover (juld, pres, float id).
+  * Bounding box drawing for query visualization.
+
+* **Profile plots**
+
+  * Temperature vs Depth (reversed y-axis), Pressure vs Depth, per-profile time-sliced overlays.
+  * Group-by `juld` to plot per-profile representative traces (shallowest, median, mean, max) selectable by the user.
+
+* **Time-series**
+
+  * Temperature vs Time with spline lines, interactive rangeslider, and per-float color mapping.
+
+* **Model diagnostics**
+
+  * Predicted vs Actual scatter plots, ensemble uncertainty (std across trees), train/test split metrics (RMSE, R²).
+
+* **Export**
+
+  * Download any plot underlying table as CSV, and export entire `argo_info` to Parquet or reconstructed NetCDF for reproducibility.
+
+---
+
+## 🧠 Multi-model ML workflow (how the app finds the "best" model)
+
+1. **Feature engineering:** latitude, longitude, pressure (`pres`), salinity (`psal`), epoch timestamp (`juld_ts`) and optional engineered features.
+2. **Sampling & splitting:** user-configurable training sample size and test fraction.
+3. **Model candidates:** RandomForest, GradientBoosting, HistGradientBoosting, XGBoost (safe), LightGBM (optional).
+4. **Pipelines:** each candidate is wrapped in a `Pipeline` with `StandardScaler` and the estimator — safe, production-friendly preprocessing.
+5. **Evaluation & selection:** compute RMSE and R² on a held-out test set; rank by chosen metric and persist the best model.
+6. **Persistence & metadata:** saved `joblib` blobs include pipeline, feature list, model name, and metrics for traceability.
+7. **Inference & uncertainty:** single-sample prediction UI + ensemble-derived std (if available) to provide simple uncertainty estimates.
+
+This workflow lets researchers quickly iterate on models and capture reproducible artifacts.
+
+---
+
+## 🛠️ Installation & Quick Start (condensed)
+
+1. Clone repository and create virtualenv.
+2. Install `pip install -r requirements.txt` (see Tech stack above for minimal & optional dependencies).
+3. Create `.env` for GEMINI/API keys and DB paths.
+4. `streamlit run app.py` and use the UI to ingest the index, download sample `.nc`, and explore.
+
+---
+
+## ✅ Operational recommendations
+
+* For **trial/demo**: use SQLite + local storage and index a small subset (`rows_to_index` = 100–1000).
+* For **research / production**: run on a server with >=8–16GB RAM, use PostgreSQL, and persist Chroma on disk (DuckDB+Parquet or dedicated Chroma server).
+* Cache geocoding results and throttle Nominatim calls to comply with usage policy.
+* Monitor disk usage — `.nc` files can accumulate quickly; provide a retention policy or a cache-cleaner job.
+
+---
+
+## 🔁 Reproducibility & provenance
+
+* Every saved model artifact contains a `features` key and `metrics` list for experiment provenance.
+* Exported Parquet / NetCDF artifacts let you reproduce training datasets exactly as used.
+
+---
+
+## 🧩 Files & Modules (recommended refactor)
+
+Suggested split if you modularize the single-file app:
+
+* `app.py` — Streamlit UI only (routing + layout).
+* `ingest.py` — index download, NetCDF parsing, ingestion helpers.
+* `db.py` — SQLAlchemy schema, migrations, DB utilities.
+* `rag.py` — LLM adapters, MCP context assembly, Chroma helpers.
+* `ml.py` — training, model wrappers, persistence.
+* `viz.py` — plotting helpers using Plotly.
+* `utils.py` — shared helpers: geocoding, session, status management.
+
+---
+
+## 🧪 Testing & CI suggestions
+
+* Add unit tests for: index parser, NetCDF parser (small fixtures), SQL builder logic (`safe_sql_builder`), and ML pipeline training with a tiny synthetic dataset.
+* CI: run `pytest`, `black --check`, and `flake8` on pushes. Build Docker image in CI for deployment validation.
+
+---
+
+## 📌 Final notes — What makes this project stand out
+
+* **End-to-end**: from raw `.nc` ingestion to ML inference and RAG answers — a complete pipeline demonstrating scientific data engineering.
+* **RAG with provenance**: retrieval traces (`_mcp_chunks`) and JSON-structured LLM outputs allow auditability and reproducibility.
+* **Production thinking**: safe wrappers, background workers, optional vector stores, and DB migrations show engineering rigor beyond a toy demo.
+* **Practical ML**: multi-model training, safe XGBoost fallbacks and ensemble uncertainty calculation demonstrate a realistic model lifecycle.
+
+---
+
+## ▶️ Working (How it actually runs — step-by-step)
+
+Below is a concise operational description of the system’s runtime behavior. It explains how data flows from remote sources, how user queries are resolved, and how ML and RAG components interact.
+
+1. **Index acquisition** — `ensure_index_file()` downloads the IFREMER index if missing and `parse_index_file()` transforms it into tabular rows. These are stored in the `argo_index` table.
+2. **Profile ingestion** — for selected index rows `download_netcdf_for_index_path()` fetches `.nc` files. `parse_profile_netcdf_to_info_rows()` flattens per-profile variables into many `argo_info` rows and `ingest_info_rows()` writes them into the DB.
+3. **Exploration & mapping** — the Streamlit UI reads `argo_index` for point/metadata queries, and `argo_info` for measurements. Maps and plots are produced with Plotly and optionally Folium.
+4. **RAG query flow** — `ask_argo_question()` parses the natural-language question (LLM or rule-based), constructs SQL (`safe_sql_builder`), optionally fetches `.nc` previews and vector hits, assembles MCP context, invokes LLM, and parses structured JSON responses. The UI renders the answer and provides index/measurement tables and downloads.
+5. **ML lifecycle** — `load_training_df()` builds the training dataset from `argo_info`. User selects models/hyperparameters in UI, trains pipelines, evaluates on a holdout, and saves best model(s) with `joblib`. Saved models can be loaded for single-sample prediction and batch evaluation.
+
+---
+
+## 🖼️ Diagrams (Mermaid)
+
+Below are Mermaid diagrams that visualize the architecture, RAG flow, and ML pipeline. Paste these blocks into a Markdown viewer that supports Mermaid (GitHub, GitLab, GitHub Pages with mermaid support, or mermaid.live) to render them. If your renderer doesn't support Mermaid, see the ASCII fallback below each diagram.
+
+### 1) System architecture (high level)
+
+```mermaid
+flowchart TD
+  subgraph REMOTE
+    IFREMER[Index: IFREMER index file]
+    DATALAKE[.nc files (IFREMER DAC)]
+  end
+
+  IFREMER -->|download| INDEX_LOCAL[Local index file]
+  INDEX_LOCAL --> parse_index[parse_index_file()]
+  parse_index --> argo_index_db[(DB: argo_index)]
+
+  argo_index_db --> UI[Streamlit UI]
+  argo_index_db --> download_nc[download_netcdf_for_index_path()]
+  download_nc --> parse_nc[parse_profile_netcdf_to_info_rows()]
+  parse_nc --> argo_info_db[(DB: argo_info)]
+
+  argo_info_db --> ML[ML training / inference]
+  UI --> ask_fn[ask_argo_question()]
+  ask_fn -->|SQL| argo_index_db
+  ask_fn -->|nc previews| argo_info_db
+  ask_fn --> mcp[assemble_mcp_context()]
+  mcp --> chroma[ChromaDB (optional)]
+  mcp --> llm[LLM (Gemini) (optional)]
+  llm --> UI
+```
+
+**ASCII fallback (architecture)**
 
 ```
-[IFREMER index (remote)] → (ensure_index_file) → index_local.txt
-  └→ parse_index_file → argo_index (DB)
+IFREMER index -> parse_index -> argo_index (DB)
+       |                                |
+       v                                v
+  download .nc -> parse_nc -> argo_info (DB) -> ML & UI
 
-[.nc files] → (download_netcdf_for_index_path) → local .nc → parse_profile_netcdf_to_info_rows → argo_info (DB)
-
-Streamlit UI → (ask_argo_question) → safe_sql_builder → SQL → DB (argo_index/argo_info)
-                      ↘ optional: read_netcdf_variables_to_df for direct previews
-
-LLM/Embeddings (optional): Gemini ↔ Embeddings → ChromaDB ↔ assemble_mcp_context → rag_answer_with_mcp
-
-ML: read argo_info → feature engineering → sklearn/xgboost/lightgbm pipelines → train/save model
+UI <-> ask_argo_question <-> DB / nc previews / MCP -> LLM/Chroma
 ```
 
 ---
 
-## 🛠️ Quickstart — Local Development
+### 2) RAG request lifecycle (sequence)
 
-### 1. Prerequisites
+```mermaid
+sequenceDiagram
+  participant User
+  participant UI
+  participant Parser
+  participant DB
+  participant NC
+  participant Chroma
+  participant LLM
 
-* Python 3.8+ (3.10/3.11 recommended)
-* Optional: PostgreSQL for production-scale DB
-* Disk space for downloaded `.nc` files (depends on index subset)
-
-### 2. Clone & virtualenv
-
-```bash
-git clone https://github.com/your-username/argo-rag-explorer.git
-cd argo-rag-explorer
-python -m venv venv
-source venv/bin/activate
+  User->>UI: Ask question (natural language)
+  UI->>Parser: llm_to_structured() or _simple_parse_question()
+  Parser->>DB: safe_sql_builder() -> index or measurements
+  DB-->>UI: index_rows / measurement_rows
+  UI->>NC: read_netcdf_variables_to_df() (if needed for previews)
+  UI->>Chroma: embed query and query collection (optional)
+  Chroma-->>UI: vector hits
+  UI->>LLM: assemble_mcp_context() + prompt
+  LLM-->>UI: JSON answer {answer, sql, references}
+  UI-->>User: Render answer + tables + downloads
 ```
 
-### 3. Minimal `requirements.txt` (suggested)
+**ASCII fallback (RAG)**
 
 ```
-streamlit
-pandas
-numpy
-xarray
-requests
-sqlalchemy
-python-dotenv
-plotly
-joblib
-scikit-learn
-netcdf4
+User -> Parser -> DB -> (nc previews & Chroma retrieval)
+      \-> assemble context -> LLM -> structured answer -> UI
 ```
 
-Optional (install if you need features):
+---
 
-```
-langchain-google-genai
-chromadb
-xgboost
-lightgbm
-folium
-streamlit-folium
-```
+### 3) ML training & inference pipeline
 
-### 4. Environment variables (`.env`)
-
-```env
-# Storage / DB
-ARGO_SQLITE_PATH=./data/argo.db
-AGENTIC_RAG_STORAGE=./storage
-AGENTIC_RAG_DB_PATH=./storage/agentic_rag_meta.db
-
-# IFREMER index URL (defaults included)
-IFREMER_INDEX_URL=https://data-argo.ifremer.fr/ar_index_global_prof.txt
-IFREMER_BASE=https://data-argo.ifremer.fr/dac
-
-# Optional LLM / Embeddings
-GEMINI_API_KEY=your_gemini_key_here
-ARGO_PG_URL=postgresql+psycopg2://user:pass@host:5432/dbname
+```mermaid
+flowchart LR
+  argo_info_db[(ARGO_INFO DB)] --> DataPrep[Feature engineering: lat,lon,pres,psal,juld_ts]
+  DataPrep --> Split[Train/Test split]
+  Split --> Models[Candidates: RandomForest, GB, HistGB, XGBoost, LightGBM]
+  Models --> Evaluate[Evaluate RMSE / R2]
+  Evaluate --> Select[Select best model by chosen metric]
+  Select --> Persist[Save joblib artifacts (pipeline + metadata)]
+  Persist --> Inference[Load in UI -> Single / Batch predict]
 ```
 
-### 5. Run the app
+**ASCII fallback (ML)**
 
-```bash
-streamlit run app.py
+```
+argo_info -> feature engineering -> train/test split -> train multiple models -> evaluate -> pick best -> save -> load & infer
 ```
 
-Visit `http://localhost:8501`.
+---
+
+## 🔚 Legend & notes on diagrams
+
+* Mermaid diagrams are included for convenience. They render on platforms that support Mermaid (GitHub, GitLab, mermaid.live, some Markdown previewers).
+* If your target platform does not support Mermaid, use the ASCII fallback provided under each diagram.
+* The diagrams are intentionally high-level; you can expand any block (e.g., `parse_profile_netcdf_to_info_rows`) into a more detailed sub-diagram if you want.
 
 ---
 
-## ⚙️ Configuration & Tuning
+If you'd like, I can now:
 
-* **Storage location**: `AGENTIC_RAG_STORAGE` — where `.nc` files and Chroma DB will be persisted.
-* **DB selection**: If `ARGO_PG_URL` is set, the app will use PostgreSQL. Otherwise it defaults to SQLite at `ARGO_SQLITE_PATH`.
-* **Concurrency & background tasks**: Long tasks (index ingest, chroma build) are executed in separate `multiprocessing.Process`. On low-memory systems, reduce batch sizes or run sequentially to avoid swapping.
+* Export this Markdown to `README.md` in the project and provide a downloadable file, or
+* Break the diagrams into separate SVG/PNG files (rendered from Mermaid) and add them to the repo, or
+* Generate a one-command `docker-compose.yml` + `Dockerfile` and `requirements.txt` tuned to include all optional components.
 
----
-
-## ✅ Recommended Deployment Options
-
-1. **Streamlit Cloud / Streamlit for Teams** — simplest for interactive demos & small datasets.
-2. **Docker** (recommended for reproducibility). Example Dockerfile snippet:
-
-```dockerfile
-FROM python:3.11-slim
-WORKDIR /app
-COPY . /app
-RUN pip install --no-cache-dir -r requirements.txt
-EXPOSE 8501
-CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
-```
-
-3. **Cloud VM (GCP/AWS/Azure)** behind a basic Nginx reverse proxy for production access. Use Postgres for DB and a managed volumes for storage.
-4. **Kubernetes** — package as a deployment with a PersistentVolume for storage and a separate job for large index/chroma builds.
-
----
-
-## 🔒 Security & Data Governance
-
-* **API keys**: Never hardcode API keys. Use `.env` for local or platform secrets for deployment.
-* **Public data**: ARGO data is generally public, but be mindful of any institutional constraints when exporting.
-* **Rate-limits**: Respect Nominatim usage policy — include a descriptive `User-Agent` and avoid automated heavy requests. Consider caching geocoding results.
-
----
-
-## 🧪 Testing & CI
-
-* Unit-testable pieces:
-
-  * `parse_index_file()` with synthetic index lines.
-  * `parse_profile_netcdf_to_info_rows()` using small `.nc` fixtures.
-  * `safe_sql_builder()` parsing logic.
-* CI: run `pytest` for parser and helper tests; add `black` and `flake8` for formatting/linting.
-
----
-
-## 🚩 Troubleshooting & Tips
-
-* **Large downloads / slow network**: Limit index rows when building Chroma. Use `rows_to_index` slider in UI.
-* **Missing variables in .nc**: The parser aggressively searches for common variable names — if your dataset uses other conventions, extend `_maybe_get` and candidate variable lists.
-* **Memory errors during Chroma build**: Increase swap / use smaller batch sizes. Consider building Chroma on a machine with more RAM or a streaming approach.
-
----
-
-## 🧾 Examples: Useful Commands & Queries
-
-* Find nearest floats:
-
-  * In UI: Nearest ARGO floats → enter lat/lon → Find nearest floats.
-* Ask natural-language question:
-
-  * "List floats in the Arabian Sea from 2019 with temperature measurements" → Chat tab.
-* Export ingested info to Parquet (UI): Exports → Export ingested info to Parquet.
-
----
-
-## 🔬 Reproducibility & Research Best Practices
-
-* Pin Python package versions in `requirements.txt` for reproducible runs.
-* Use small, versioned subsets of the IFREMER index when iterating.
-* Store trained model artifacts with metadata (features, training sample size, metrics) — current `joblib` artifacts embed that metadata.
-
----
-
-## 📚 Contributing
-
-Contributions are welcome. Please follow these guidelines:
-
-1. Fork the repo and create a feature branch.
-2. Run tests and linting locally.
-3. Open a PR describing the feature/bugfix and tests.
-
-Suggested areas for contributions:
-
-* Modularize `app.py` into `ui.py`, `ingest.py`, `rag.py`, and `ml.py`.
-* Add unit tests for the NetCDF parser with small fixtures.
-* Add streaming ingestion for ultra-large indexes.
-
----
-
-## 🧾 Attribution & Credits
-
-* Built by **Ayush Kumar Shaw** (NIT Durgapur).
-* Inspired by open ARGO datasets and modern RAG/LLM workflows.
-
----
-
-## 📜 License
-
-This project is released under the **MIT License**. See `LICENSE`.
-
----
-
-## 📌 Changelog (high level)
-
-* v0.1 — Initial ingestion + UI + NetCDF parser.
-* v0.2 — RAG integration + Chroma indexing + background workers.
-* v0.3 — ML training UI + model persistence + export features.
-
----
-
-
-
-
-
-
-
-
-
-
-
-
+Which would you like next?
