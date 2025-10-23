@@ -1,4 +1,4 @@
-# 🌊 ARGO RAG Explorer — Full-feature, Tech-complete README
+# 🌊 ARGO RAG Explorer
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/) [![Streamlit](https://img.shields.io/badge/Streamlit-app-orange.svg)](https://streamlit.io) [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/)
 
