@@ -218,95 +218,88 @@ Below is a concise operational description of the system’s runtime behavior. I
 
 ---
 
-## 🖼️ Diagrams (Mermaid)
+## 🖼️ Diagrams (Mermaid) — corrected
 
-Below are Mermaid diagrams that visualize the architecture, RAG flow, and ML pipeline. Paste these blocks into a Markdown viewer that supports Mermaid (GitHub, GitLab, GitHub Pages with mermaid support, or mermaid.live) to render them. If your renderer doesn't support Mermaid, see the ASCII fallback below each diagram.
+Below are corrected Mermaid diagrams that visualize the architecture and ML pipeline. Paste them into a Markdown viewer that supports Mermaid (GitHub, GitLab, mermaid.live) to render. ASCII fallbacks follow each diagram.
 
-### 1) System architecture (high level)
+### 1) System architecture (high level) — corrected
 
 ```mermaid
 flowchart TD
   subgraph REMOTE
-    IFREMER[Index: IFREMER index file]
-    DATALAKE[.nc files (IFREMER DAC)]
+    IFREMER_INDEX["IFREMER index file
+(ar_index_global_prof.txt)"]
+    DAC["IFREMER DAC (.nc files)"]
   end
 
-  IFREMER -->|download| INDEX_LOCAL[Local index file]
-  INDEX_LOCAL --> parse_index[parse_index_file()]
-  parse_index --> argo_index_db[(DB: argo_index)]
+  subgraph LOCAL
+    INDEX_LOCAL["Local index file"]
+    ARGO_INDEX[("DB: argo_index")]
+    ARGO_INFO[("DB: argo_info")]
+    STORAGE["Storage: .nc files & chroma dir"]
+    STREAMLIT["Streamlit UI (app.py)"]
+    WORKERS["Background workers (ingest, chroma build)"]
+    ML_COMP["ML training / inference"]
+    CHROMA["ChromaDB (optional)"]
+    LLM["LLM (optional, Gemini)"]
+  end
 
-  argo_index_db --> UI[Streamlit UI]
-  argo_index_db --> download_nc[download_netcdf_for_index_path()]
-  download_nc --> parse_nc[parse_profile_netcdf_to_info_rows()]
-  parse_nc --> argo_info_db[(DB: argo_info)]
+  IFREMER_INDEX -->|download| INDEX_LOCAL
+  INDEX_LOCAL -->|parse_index_file()| ARGO_INDEX
+  ARGO_INDEX --> STREAMLIT
+  STREAMLIT -->|user triggers download| STORAGE
+  STORAGE -->|local .nc| ARGO_INFO
 
-  argo_info_db --> ML[ML training / inference]
-  UI --> ask_fn[ask_argo_question()]
-  ask_fn -->|SQL| argo_index_db
-  ask_fn -->|nc previews| argo_info_db
-  ask_fn --> mcp[assemble_mcp_context()]
-  mcp --> chroma[ChromaDB (optional)]
-  mcp --> llm[LLM (Gemini) (optional)]
-  llm --> UI
+  STREAMLIT -->|ask_argo_question()| ARGO_INDEX
+  STREAMLIT -->|read previews / measurements| ARGO_INFO
+
+  STREAMLIT --> WORKERS
+  WORKERS --> ARGO_INDEX
+  WORKERS --> STORAGE
+
+  STREAMLIT --> ML_COMP
+  ML_COMP --> ARGO_INFO
+
+  STREAMLIT -->|assemble_mcp_context()| CHROMA
+  CHROMA --> STREAMLIT
+  STREAMLIT --> LLM
+  LLM --> STREAMLIT
 ```
 
 **ASCII fallback (architecture)**
 
 ```
-IFREMER index -> parse_index -> argo_index (DB)
-       |                                |
-       v                                v
-  download .nc -> parse_nc -> argo_info (DB) -> ML & UI
+REMOTE:
+  IFREMER index file -> Local index file -> parse_index_file() -> argo_index (DB)
+  IFREMER DAC (.nc) -> download to STORAGE -> parsed -> argo_info (DB)
 
-UI <-> ask_argo_question <-> DB / nc previews / MCP -> LLM/Chroma
+LOCAL:
+  Streamlit UI reads argo_index and argo_info
+  Streamlit triggers background workers to ingest index or build chroma
+  ML training reads argo_info; RAG uses chroma + LLM
 ```
 
 ---
 
-### 2) RAG request lifecycle (sequence)
-
-```mermaid
-sequenceDiagram
-  participant User
-  participant UI
-  participant Parser
-  participant DB
-  participant NC
-  participant Chroma
-  participant LLM
-
-  User->>UI: Ask question (natural language)
-  UI->>Parser: llm_to_structured() or _simple_parse_question()
-  Parser->>DB: safe_sql_builder() -> index or measurements
-  DB-->>UI: index_rows / measurement_rows
-  UI->>NC: read_netcdf_variables_to_df() (if needed for previews)
-  UI->>Chroma: embed query and query collection (optional)
-  Chroma-->>UI: vector hits
-  UI->>LLM: assemble_mcp_context() + prompt
-  LLM-->>UI: JSON answer {answer, sql, references}
-  UI-->>User: Render answer + tables + downloads
-```
-
-**ASCII fallback (RAG)**
-
-```
-User -> Parser -> DB -> (nc previews & Chroma retrieval)
-      \-> assemble context -> LLM -> structured answer -> UI
-```
-
----
-
-### 3) ML training & inference pipeline
+### 2) ML training & inference pipeline — corrected
 
 ```mermaid
 flowchart LR
-  argo_info_db[(ARGO_INFO DB)] --> DataPrep[Feature engineering: lat,lon,pres,psal,juld_ts]
-  DataPrep --> Split[Train/Test split]
-  Split --> Models[Candidates: RandomForest, GB, HistGB, XGBoost, LightGBM]
-  Models --> Evaluate[Evaluate RMSE / R2]
-  Evaluate --> Select[Select best model by chosen metric]
-  Select --> Persist[Save joblib artifacts (pipeline + metadata)]
-  Persist --> Inference[Load in UI -> Single / Batch predict]
+  ARGO_INFO[("argo_info DB")]
+  DataPrep["Feature engineering
+(lat, lon, pres, psal, juld_ts)"]
+  Split["Train / Test split"]
+  Candidates["Model candidates
+(RandomForest, GB, HistGB, XGB, LGB)"]
+  Pipelines["Pipelines (Scaler + Estimator)"]
+  Evaluate["Evaluate (RMSE, R2)"]
+  Select["Select best model (metric)
+& persist metadata"]
+  Persist["Persist: joblib (pipeline + features + metrics)"]
+  Inference["Load and predict (single / batch)
+Uncertainty: ensemble std if available"]
+
+  ARGO_INFO --> DataPrep --> Split --> Candidates --> Pipelines --> Evaluate --> Select --> Persist --> Inference
 ```
 
 **ASCII fallback (ML)**
@@ -324,11 +317,3 @@ argo_info -> feature engineering -> train/test split -> train multiple models ->
 * The diagrams are intentionally high-level; you can expand any block (e.g., `parse_profile_netcdf_to_info_rows`) into a more detailed sub-diagram if you want.
 
 ---
-
-If you'd like, I can now:
-
-* Export this Markdown to `README.md` in the project and provide a downloadable file, or
-* Break the diagrams into separate SVG/PNG files (rendered from Mermaid) and add them to the repo, or
-* Generate a one-command `docker-compose.yml` + `Dockerfile` and `requirements.txt` tuned to include all optional components.
-
-Which would you like next?
