@@ -269,9 +269,14 @@ This project is released under the **MIT License**. See `LICENSE`.
 
 ---
 
-If you want, I can:
 
-* convert this README into `README.md` with polished badges and images, or
-* split `app.py` into modular files and generate a `requirements.txt` + `Dockerfile` + `docker-compose.yml` for a one-command local deployment.
 
-Tell me which next step you want and I will update the canvas accordingly.
+
+
+
+
+
+
+
+
+
