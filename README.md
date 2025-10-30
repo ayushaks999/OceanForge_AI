@@ -156,7 +156,7 @@ This workflow lets researchers quickly iterate on models and capture reproducibl
 1. Clone repository and create virtualenv.
 2. Install `pip install -r requirements.txt` (see Tech stack above for minimal & optional dependencies).
 3. Create `.env` for GEMINI/API keys and DB paths.
-4. `streamlit run app.py` and use the UI to ingest the index, download sample `.nc`, and explore.
+4. `streamlit run app1.py` and use the UI to ingest the index, download sample `.nc`, and explore.
 
 ---
 
