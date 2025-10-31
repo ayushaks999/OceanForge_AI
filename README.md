@@ -177,26 +177,7 @@ This workflow lets researchers quickly iterate on models and capture reproducibl
 
 ---
 
-## 🧩 Files & Modules (recommended refactor)
 
-Suggested split if you modularize the single-file app:
-
-* `app.py` — Streamlit UI only (routing + layout).
-* `ingest.py` — index download, NetCDF parsing, ingestion helpers.
-* `db.py` — SQLAlchemy schema, migrations, DB utilities.
-* `rag.py` — LLM adapters, MCP context assembly, Chroma helpers.
-* `ml.py` — training, model wrappers, persistence.
-* `viz.py` — plotting helpers using Plotly.
-* `utils.py` — shared helpers: geocoding, session, status management.
-
----
-
-## 🧪 Testing & CI suggestions
-
-* Add unit tests for: index parser, NetCDF parser (small fixtures), SQL builder logic (`safe_sql_builder`), and ML pipeline training with a tiny synthetic dataset.
-* CI: run `pytest`, `black --check`, and `flake8` on pushes. Build Docker image in CI for deployment validation.
-
----
 
 ## 📌 Final notes — What makes this project stand out
 
@@ -334,16 +315,9 @@ flowchart LR
 argo_info -> feature engineering -> train/test split -> train multiple models -> evaluate -> pick best -> save -> load & infer
 ```
 
----
 
-## 🔚 Legend & notes on diagrams
-
-* Mermaid diagrams are included for convenience. They render on platforms that support Mermaid (GitHub, GitLab, mermaid.live, some Markdown previewers).
-* If your target platform does not support Mermaid, use the ASCII fallback provided under each diagram.
-* The diagrams are intentionally high-level; you can expand any block (e.g., `parse_profile_netcdf_to_info_rows`) into a more detailed sub-diagram if you want.
 
 ---
-
 
 
 
