@@ -300,17 +300,24 @@ User -> UI -> Parser -> DB
 
 ```mermaid
 flowchart LR
-  ARGO_INFO["argo_info DB"]
-  DataPrep["Feature engineering\nlat, lon, pres, psal, juld_ts"]
-  Split["Train / Test split"]
-  Candidates["Model candidates\nRF, GB, HistGB, XGB, LGB"]
-  Pipelines["Pipelines: Scaler + Estimator"]
-  Evaluate["Evaluate: RMSE, R2"]
-  Select["Select best model"]
-  Persist["Persist: joblib (pipeline + metadata)"]
-  Inference["Inference: Load and predict\nEnsemble uncertainty if available"]
+  A[argo_info DB]
+  B[Feature engineering<br/>lat, lon, pres, psal, juld_ts]
+  C[Train / Test split]
+  D[Model candidates<br/>RF, GB, HistGB, XGB, LGB]
+  E[Pipelines: Scaler + Estimator]
+  F[Evaluate: RMSE, R2]
+  G[Select best model]
+  H[Persist: joblib (pipeline + metadata)]
+  I[Inference: Load and predict<br/>Ensemble uncertainty if available]
 
-  ARGO_INFO --> DataPrep --> Split --> Candidates --> Pipelines --> Evaluate --> Select --> Persist --> Inference
+  A --> B
+  B --> C
+  C --> D
+  D --> E
+  E --> F
+  F --> G
+  G --> H
+  H --> I
 ````
 
 **ASCII fallback (ML pipeline)**
@@ -321,6 +328,9 @@ argo_info -> feature engineering -> train/test split -> train multiple models ->
 
 argo_info -> feature engineering -> train/test split -> train multiple models -> evaluate -> pick best -> save -> load & infer
 
+```
+
+argo_info -> feature engineering -> train/test split -> train multiple models -> evaluate -> pick best -> save -> load & infer
 ```
 
 ---
@@ -349,11 +359,11 @@ Include a small `tests/data/sample_index_small.txt` or a one-off `sample_profile
 
 ## ✅ Final checklist before demoing
 
-- [ ] Confirm `requirements.txt` lists optional packages as extras (e.g., `[chroma]`, `[xgboost]`).
-- [ ] Add a small dataset for fast demos.
-- [ ] Add `--rows-to-index` CLI flag or Streamlit UI control to limit indexing during demos.
-- [ ] Verify model persistence metadata contains `features` and `metrics`.
-- [ ] Add a short CONTRIBUTING.md with reproducible steps for reviewers.
+* [ ] Confirm `requirements.txt` lists optional packages as extras (e.g., `[chroma]`, `[xgboost]`).
+* [ ] Add a small dataset for fast demos.
+* [ ] Add `--rows-to-index` CLI flag or Streamlit UI control to limit indexing during demos.
+* [ ] Verify model persistence metadata contains `features` and `metrics`.
+* [ ] Add a short CONTRIBUTING.md with reproducible steps for reviewers.
 
 ---
 
@@ -364,5 +374,3 @@ Pull requests welcome — please open issues for feature requests or bugs. For b
 ---
 
 *Generated README — corrected Mermaid code blocks and explicit ASCII fallbacks included.*
-
-```
