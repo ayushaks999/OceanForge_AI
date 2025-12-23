@@ -286,8 +286,13 @@ sequenceDiagram
 
 ```
 User -> UI -> Parser -> DB
-    \-> (nc previews, chroma retrieval) -> assemble context -> LLM -> structured answer -> UI
+    -> (nc previews, chroma retrieval) -> assemble context -> LLM -> structured answer -> UI
 ```
+
+User -> UI -> Parser -> DB
+-> (nc previews, chroma retrieval) -> assemble context -> LLM -> structured answer -> UI
+
+````
 
 ---
 
@@ -306,12 +311,16 @@ flowchart LR
   Inference["Inference: Load and predict\nEnsemble uncertainty if available"]
 
   ARGO_INFO --> DataPrep --> Split --> Candidates --> Pipelines --> Evaluate --> Select --> Persist --> Inference
-```
+````
 
 **ASCII fallback (ML pipeline)**
 
 ```
 argo_info -> feature engineering -> train/test split -> train multiple models -> evaluate -> pick best -> save -> load & infer
+```
+
+argo_info -> feature engineering -> train/test split -> train multiple models -> evaluate -> pick best -> save -> load & infer
+
 ```
 
 ---
@@ -340,11 +349,11 @@ Include a small `tests/data/sample_index_small.txt` or a one-off `sample_profile
 
 ## ✅ Final checklist before demoing
 
-* [ ] Confirm `requirements.txt` lists optional packages as extras (e.g., `[chroma]`, `[xgboost]`).
-* [ ] Add a small dataset for fast demos.
-* [ ] Add `--rows-to-index` CLI flag or Streamlit UI control to limit indexing during demos.
-* [ ] Verify model persistence metadata contains `features` and `metrics`.
-* [ ] Add a short CONTRIBUTING.md with reproducible steps for reviewers.
+- [ ] Confirm `requirements.txt` lists optional packages as extras (e.g., `[chroma]`, `[xgboost]`).
+- [ ] Add a small dataset for fast demos.
+- [ ] Add `--rows-to-index` CLI flag or Streamlit UI control to limit indexing during demos.
+- [ ] Verify model persistence metadata contains `features` and `metrics`.
+- [ ] Add a short CONTRIBUTING.md with reproducible steps for reviewers.
 
 ---
 
@@ -354,3 +363,6 @@ Pull requests welcome — please open issues for feature requests or bugs. For b
 
 ---
 
+*Generated README — corrected Mermaid code blocks and explicit ASCII fallbacks included.*
+
+```
