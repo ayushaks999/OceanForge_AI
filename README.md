@@ -285,7 +285,7 @@ sequenceDiagram
 
 ---
 
-### 2) ML training & inference pipeline — corrected
+### 3) ML training & inference pipeline 
 
 ```mermaid
 flowchart LR
