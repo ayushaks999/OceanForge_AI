@@ -1,12 +1,13 @@
 # 🌊 ARGO RAG Explorer
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/) [![Streamlit](https://img.shields.io/badge/Streamlit-app-orange.svg)](https://streamlit.io) [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/) [![Streamlit](https://img.shields.io/badge/Streamlit-app-orange.svg)](https://streamlit.io) [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com)
 
 **Tagline:** *An enterprise-grade Streamlit application for ingestion, RAG-enabled exploration, advanced plotting, and multi-model ML workflows over ARGO oceanographic profiles.*
 
 ---
 
-🎥 Demo Video: https://drive.google.com/file/d/1z4KcsmFagrl_vT5KUTiyxQ-sfWzFqrkK/view?usp=drive_link
+🎥 Demo Video: [https://drive.google.com/file/d/1z4KcsmFagrl_vT5KUTiyxQ-sfWzFqrkK/view?usp=drive_link](https://drive.google.com/file/d/1z4KcsmFagrl_vT5KUTiyxQ-sfWzFqrkK/view?usp=drive_link)
+
 ## 🔎 Executive summary
 
 ARGO RAG Explorer is a production-focused research application that converts ARGO NetCDF profiles into a queryable relational store, provides advanced interactive visualization, supports Retrieval-Augmented Generation (RAG) and vector search workflows, and exposes a multi-model ML pipeline for predicting oceanographic variables (temperature, salinity, etc.).
@@ -177,8 +178,6 @@ This workflow lets researchers quickly iterate on models and capture reproducibl
 
 ---
 
-
-
 ## 📌 Final notes — What makes this project stand out
 
 * **End-to-end**: from raw `.nc` ingestion to ML inference and RAG answers — a complete pipeline demonstrating scientific data engineering.
@@ -200,11 +199,11 @@ Below is a concise operational description of the system’s runtime behavior. I
 
 ---
 
-## 🖼️ Diagrams (Mermaid) — corrected
+## 🖼️ Diagrams (Mermaid) — corrected + visible ASCII fallbacks
 
-Below are corrected Mermaid diagrams that visualize the architecture and ML pipeline. Paste them into a Markdown viewer that supports Mermaid (GitHub, GitLab, mermaid.live) to render. ASCII fallbacks follow each diagram.
+> **Note:** Many Markdown viewers (GitHub, GitLab, mermaid.live) render Mermaid diagrams inside fenced code blocks using the `mermaid` language. If your renderer does not support Mermaid, the ASCII fallback that follows each diagram block provides a readable alternative.
 
-### 1) System architecture (high level) — corrected
+### 1) System architecture (high level)
 
 ```mermaid
 flowchart TD
@@ -249,7 +248,7 @@ flowchart TD
 ```
 REMOTE:
   IFREMER index file -> Local index file -> parse_index_file() -> argo_index (DB)
-  IFREMER DAC (.nc) -> download to STORAGE -> parsed -> argo_info (DB)
+  IFREMER DAC (.nc)   -> download to STORAGE -> parsed -> argo_info (DB)
 
 LOCAL:
   Streamlit UI reads argo_index and argo_info
@@ -283,7 +282,7 @@ sequenceDiagram
   UI-->>User: Render answer, tables, downloads
 ```
 
-**ASCII fallback (RAG)**
+**ASCII fallback (RAG sequence)**
 
 ```
 User -> UI -> Parser -> DB
@@ -292,7 +291,7 @@ User -> UI -> Parser -> DB
 
 ---
 
-### 3) ML training & inference pipeline — corrected
+### 3) ML training & inference pipeline
 
 ```mermaid
 flowchart LR
@@ -309,51 +308,49 @@ flowchart LR
   ARGO_INFO --> DataPrep --> Split --> Candidates --> Pipelines --> Evaluate --> Select --> Persist --> Inference
 ```
 
-**ASCII fallback (ML)**
+**ASCII fallback (ML pipeline)**
 
 ```
 argo_info -> feature engineering -> train/test split -> train multiple models -> evaluate -> pick best -> save -> load & infer
 ```
 
+---
 
+## 📌 Tips for rendering Mermaid diagrams
+
+* On GitHub: Mermaid is supported in repo READMEs if the repository has GitHub's mermaid support enabled. If your viewer doesn't render Mermaid, use [https://mermaid.live](https://mermaid.live/) — paste a diagram there to preview and export.
+* For local preview: use VSCode with a Mermaid preview extension, or render with `mermaid-cli`.
+* The ASCII fallbacks above are intentionally complete for viewers that do not support Mermaid.
 
 ---
 
+## 🛡️ Safety, reproducibility & testing
 
+* Unit tests for ingestion and parsing functions are encouraged — add `pytest` tests for `parse_index_file()`, `parse_profile_netcdf_to_info_rows()`, and `safe_sql_builder()`.
+* Add CI checks (linting, black, mypy if used) to keep the codebase maintainable.
+* Protect API keys and credentials with environment variables and never commit them to Git.
 
+---
 
+## 📂 Useful example index / small test dataset
 
+Include a small `tests/data/sample_index_small.txt` or a one-off `sample_profiles/` folder with a couple of short `.nc` files for fast local testing and CI.
 
+---
 
+## ✅ Final checklist before demoing
 
+* [ ] Confirm `requirements.txt` lists optional packages as extras (e.g., `[chroma]`, `[xgboost]`).
+* [ ] Add a small dataset for fast demos.
+* [ ] Add `--rows-to-index` CLI flag or Streamlit UI control to limit indexing during demos.
+* [ ] Verify model persistence metadata contains `features` and `metrics`.
+* [ ] Add a short CONTRIBUTING.md with reproducible steps for reviewers.
 
+---
 
+## 📬 Feedback / contributions
 
+Pull requests welcome — please open issues for feature requests or bugs. For big changes, open an issue first to discuss design.
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+---
 
